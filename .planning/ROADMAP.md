@@ -27,7 +27,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   1. Running the data preparation script produces three on-disk splits (D_std, D_harmful, D_unlabeled) from TinyStories English+Spanish with the correct proportions (25% EN D_std, (100-x)% ES D_harmful, 75% EN + x% ES D_unlabeled) for a given x
   2. MultiDataLoader yields batches from each split independently, with configurable upsample factors, and each batch is tagged with its split label (D_std/D_harmful/D_unlabeled)
   3. A pre-generated data_split_order schedule controls the per-step training mix, and iterating through it draws from the correct split at each step
-**Plans**: TBD
+**Plans**: 2 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Setup + prepare.py: env setup, test stubs (RED), implement compute_splits/prepare (GREEN) [DATA-01]
+- [ ] 01-02-PLAN.md — MultiDataLoader: test stubs (RED), implement datamodule.py with dynamic weighted sampling (GREEN) [DATA-02, DATA-03]
 
 ### Phase 2: Model Architecture & Masking
 **Goal**: A SafeMoE model with designatable harmful experts and verified masking primitives that correctly isolate gradient and activation flow
@@ -70,7 +74,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Data Pipeline | 0/TBD | Not started | - |
+| 1. Data Pipeline | 0/2 | Not started | - |
 | 2. Model Architecture & Masking | 0/TBD | Not started | - |
 | 3. SGTM Training Loop | 0/TBD | Not started | - |
 | 4. Ablation & Evaluation | 0/TBD | Not started | - |
