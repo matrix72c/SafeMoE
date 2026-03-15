@@ -1,12 +1,12 @@
 # Phase 1: Data Pipeline - Context
 
-**Gathered:** 2026-03-14
+**Gathered:** 2026-03-14 (updated 2026-03-15)
 **Status:** Ready for planning
 
 <domain>
 ## Phase Boundary
 
-Build a data preparation script that tokenizes the TinyStories bilingual dataset (English + Spanish) and partitions it into three on-disk splits (D_std, D_harmful, D_unlabeled), plus a MultiDataLoader that serves per-split batches to the training loop via dynamic weighted sampling. Val sets for D_std and D_harmful are derived from the parquet validation shards; D_unlabeled has no val set (per paper reference implementation).
+Build a data preparation script that tokenizes the TinyStories bilingual dataset (English + Spanish) and partitions it into three on-disk splits (D_std, D_harmful, D_unlabeled), plus a MultiDataLoader that exposes per-split DataLoaders to the training loop. Val sets for D_std and D_harmful are derived from the parquet validation shards; D_unlabeled has no val set (per paper reference implementation).
 
 </domain>
 
@@ -20,29 +20,55 @@ Build a data preparation script that tokenizes the TinyStories bilingual dataset
 
 ### Storage format
 - Raw source: `data/multilingual-tinystories/{en,es}/{train,validation}.parquet` — already on disk, no download step
+  - Confirmed row counts: 2,119,719 EN train, 2,119,719 ES train, 21,990 EN val, 21,990 ES val
 - Read parquet with pandas/pyarrow (both already in litgpt dependency set)
 - Tokenized output: LitData streaming format (`litdata.optimize()` + `StreamingDataset`), consistent with existing `litgpt/data/tinystories.py`
-- Cache layout: `data/.cache/{tokenizer_name}/{split}/` — e.g., `data/.cache/gpt2/D_std/`, `data/.cache/gpt2/D_harmful/`, `data/.cache/gpt2/D_unlabeled/`
+- Cache layout: `data/.cache/{tokenizer_name}/{x}-{y}/{split}/{train|val}` — e.g. `data/.cache/Qwen3-30B-A3B-Base/0-25/D_std/train/`
+  - Directory names use integer format: `{x}-{y}` (e.g. `0-25`, not `x0.0_y25.0`)
 - Separate on-disk directories per split (not combined with tags)
 
-### Validation splits
-- Use the parquet validation shards directly:
-  - D_std_val = val_EN (from `data/multilingual-tinystories/en/validation.parquet`)
-  - D_harmful_val = val_ES (from `data/multilingual-tinystories/es/validation.parquet`)
-  - D_unlabeled: **no validation set** (matches paper reference implementation)
-- Three separate val loaders exposed by MultiDataLoader (one per split that has a val set)
+### Split formula (two-parameter scheme)
+- `x` = percentage of ES rows that goes to D_unlabeled (ES leak parameter)
+- `y` = percentage of EN rows that goes to D_std (EN retention parameter)
+- Split logic:
+  - D_std = first y% of EN rows
+  - D_harmful = first (100-x)% of ES rows
+  - D_unlabeled = remaining (100-y)% of EN rows + remaining x% of ES rows
+- Defaults: x=0, y=25 (matches original paper proportions: 25% EN → D_std, 100% ES → D_harmful)
+- Example with defaults (x=0, y=25): D_std≈529,929 EN, D_harmful=2,119,719 ES, D_unlabeled≈1,589,790 EN
+- x and y are independent sweep parameters for ablation studies
 
-### Training step sampling (replaces DATA-03 pre-generated list)
-- No pre-generated `data_split_order` file — dynamic weighted sampling per step
-- At each step, MultiDataLoader samples which split to draw from, weighted by split sizes (derived from x% config)
-- Interface: `multi_loader.next()` → `(batch, split_label)` — training loop calls `next()` each step, receives both the data and the split tag (`"D_std"` / `"D_harmful"` / `"D_unlabeled"`)
-- Upsample factors (`upsample_std`, `upsample_harmful`, `upsample_unlabeled`) remain configurable per DATA-02
+### Tokenizer
+- Use `checkpoints/Qwen3-30B-A3B-Base/` as the tokenizer checkpoint directory (151,643-vocab Qwen3 BPE)
+- **Overrides original requirement DATA-01** which specified tiktoken gpt2 — using Qwen3 tokenizer instead
+- Default `--checkpoint_dir` for prepare.py CLI: `checkpoints/Qwen3-30B-A3B-Base`
+- The tokenizer's `model_name` property is used for cache dir naming (e.g. `Qwen3-30B-A3B-Base`)
+
+### Validation splits
+- D_std_val = val_EN (from `data/multilingual-tinystories/en/validation.parquet`)
+- D_harmful_val = val_ES (from `data/multilingual-tinystories/es/validation.parquet`)
+- D_unlabeled: **no validation set** (matches paper reference implementation)
+
+### MultiDataLoader interface
+- MultiDataLoader is a **loader registry** — it wraps three StreamingDataLoaders and exposes them to the training loop
+- **No `next()` method** — the training loop controls which split to use each step
+- Primary access method: `get_loader(split_name: str) -> DataLoader`
+  - Training loop calls `get_loader('D_std')`, `get_loader('D_harmful')`, `get_loader('D_unlabeled')` directly
+  - Training loop manages its own iterators (e.g. `iter(multi_loader.get_loader('D_harmful'))`)
+- Val access: `val_dataloaders() -> dict` returns `{"D_std": loader, "D_harmful": loader}`
+- LightningDataModule compat methods present: `train_dataloader()` and `val_dataloader()` (for framework integration)
+
+### Sampling / scheduling (belongs in training loop, Phase 3)
+- Training loop decides which split to use each step via `random.choices(['D_std', 'D_harmful', 'D_unlabeled'], weights=[...])`
+- Upsample weights (`upsample_std`, `upsample_harmful`, `upsample_unlabeled`) are training loop config, NOT stored in MultiDataLoader
+- No minimum mixing gap — same split can appear in consecutive steps
+- No pre-generated `data_split_order` file (dynamic sampling at training time)
 
 ### Claude's Discretion
 - Exact LitData chunk size and num_workers for `optimize()`
 - How the prep script reports progress (tqdm vs print)
-- Seed handling for weighted sampling reproducibility
-- Whether MultiDataLoader wraps LitData `StreamingDataLoader` or standard PyTorch `DataLoader`
+- Seed handling in tests for reproducibility
+- MultiDataLoader constructor field names (beyond the interface decisions above)
 
 </decisions>
 
@@ -52,7 +78,7 @@ Build a data preparation script that tokenizes the TinyStories bilingual dataset
 ### Reusable Assets
 - `litgpt/data/tinystories.py`: Reference implementation — shows the `optimize()` + `StreamingDataset` + `StreamingDataLoader` pattern for TinyStories tokenization. Reuse the `tokenize()` function pattern and LitData API calls.
 - `litgpt/data/base.py`: `DataModule` base class with `connect()`, `train_dataloader()`, `val_dataloader()` — `MultiDataLoader` should follow the same interface.
-- `litgpt/tokenizer.py`: `Tokenizer` wrapper — use for tiktoken gpt2 tokenization.
+- `litgpt/tokenizer.py`: `Tokenizer` wrapper — use for Qwen3 BPE tokenization. Requires `tokenizer.json` in checkpoint dir (available at `checkpoints/Qwen3-30B-A3B-Base/`).
 
 ### Established Patterns
 - Data prep: `litdata.optimize(fn=tokenize_fn, inputs=files, output_dir=..., chunk_bytes="200MB", item_loader=TokensLoader())`
@@ -60,8 +86,9 @@ Build a data preparation script that tokenizes the TinyStories bilingual dataset
 - Config: `@dataclass` extending `DataModule`, with `connect()` for tokenizer/batch_size/max_seq_length
 
 ### Integration Points
-- Training loop (Phase 3) calls `multi_loader.next()` → `(batch, split_label)` each step
-- Val evaluation (Phase 4 / EVAL-01) calls per-split val loaders: `multi_loader.val_dataloaders()` → `{split: DataLoader}`
+- Training loop (Phase 3) calls `multi_loader.get_loader(split_label)` to get the appropriate DataLoader each step
+- Training loop manages its own split schedule and does `random.choices()` for weighted sampling
+- Val evaluation (Phase 4 / EVAL-01) calls `multi_loader.val_dataloaders()` → `{"D_std": DataLoader, "D_harmful": DataLoader}`
 - CLI entry `python -m safemoe pretrain` will instantiate `MultiDataLoader` from YAML config
 
 </code_context>
@@ -71,7 +98,8 @@ Build a data preparation script that tokenizes the TinyStories bilingual dataset
 
 - The original paper's reference code (`tinystories_tokenize_and_split.py`) is the canonical reference for partitioning logic — researcher should check it
 - `data/multilingual-tinystories` already exists with `{en,es}/{train,validation}.parquet`; prep script reads from there, no download logic needed
-- Dynamic sampling means `MultiDataLoader` internally tracks iterators for each split and restarts them when exhausted (infinite cycle), sampling based on configured split weights each call to `next()`
+- Two-parameter split (x, y) enables independent ablation of ES leakage and EN retention in experiments
+- Cache directory naming uses integer format `{x}-{y}` (e.g., `0-25`) for human-readable directory names
 
 </specifics>
 
@@ -86,3 +114,4 @@ None — discussion stayed within phase scope.
 
 *Phase: 01-data-pipeline*
 *Context gathered: 2026-03-14*
+*Context updated: 2026-03-15 — two-param split (x/y), Qwen3 tokenizer, revised MultiDataLoader interface (get_loader() instead of next())*
