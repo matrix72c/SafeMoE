@@ -12,7 +12,7 @@ Milestone 1 (PT Phase Validation) delivers a working SGTM pretraining pipeline o
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Data Pipeline** - TinyStories bilingual tokenization, three-split partitioning, and multi-stream DataLoader
+- [x] **Phase 1: Data Pipeline** - TinyStories bilingual tokenization, three-split partitioning, and multi-stream DataLoader (completed 2026-03-15)
 - [ ] **Phase 2: Model Architecture & Masking** - SafeMoELayer, HarmfulParamRegistry, gradient/activation maskers with unit tests
 - [ ] **Phase 3: SGTM Training Loop** - Forked pretrain.py with 3-path SGTM branching, CLI entry point, and dual optimizer
 - [ ] **Phase 4: Ablation & Evaluation** - Expert ablation utility, per-split perplexity, routing attribution, mid-training eval
@@ -74,7 +74,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Data Pipeline | 1/2 | In progress | - |
+| 1. Data Pipeline | 2/2 | Complete   | 2026-03-15 |
 | 2. Model Architecture & Masking | 0/TBD | Not started | - |
 | 3. SGTM Training Loop | 0/TBD | Not started | - |
 | 4. Ablation & Evaluation | 0/TBD | Not started | - |

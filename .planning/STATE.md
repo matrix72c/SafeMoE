@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: in-progress
-stopped_at: Completed 01-data-pipeline/01-01-PLAN.md
-last_updated: "2026-03-15T15:06:15Z"
-last_activity: 2026-03-15 -- Executed 01-01: data preparation pipeline (compute_splits + prepare + litdata)
+status: executing
+stopped_at: Completed 01-data-pipeline/01-02-PLAN.md
+last_updated: "2026-03-15T15:19:31.341Z"
+last_activity: "2026-03-15 -- Executed 01-01: data preparation pipeline (compute_splits + prepare + litdata)"
 progress:
   total_phases: 4
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 2
-  completed_plans: 1
+  completed_plans: 2
   percent: 50
 ---
 
@@ -50,6 +50,7 @@ Progress: [##########          ] 50%
 - Trend: first data point
 
 *Updated after each plan completion*
+| Phase 01-data-pipeline P02 | 6 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -67,6 +68,8 @@ Recent decisions affecting current work:
 - [01-01]: Removed tests/safemoe/__init__.py — pytest namespace collision shadowed source safemoe package
 - [01-01]: Added test injection kwargs to prepare() (tokenizer, en_train, es_train, en_val, es_val) for testability without Qwen3 checkpoint
 - [01-01]: TokensLoader(block_size=N) required in StreamingDataset — TokensLoader() without block_size causes TypeError in ROI generation
+- [Phase 01-02]: get_loader() returns DataLoader directly; training loop manages its own iter() — no next() on MultiDataLoader
+- [Phase 01-02]: Module-level _tokenize_row() in tests replaces lambda — litdata spawn workers cannot pickle local closures; start_method='fork' added as safety
 
 ### Pending Todos
 
@@ -79,6 +82,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-15T15:06:15Z
-Stopped at: Completed 01-data-pipeline/01-01-PLAN.md
-Resume file: .planning/phases/01-data-pipeline/01-02-PLAN.md
+Last session: 2026-03-15T15:19:31.337Z
+Stopped at: Completed 01-data-pipeline/01-02-PLAN.md
+Resume file: None
