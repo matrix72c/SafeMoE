@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: planning
-stopped_at: Phase 1 context updated (two-param split, Qwen3 tokenizer, get_loader interface)
-last_updated: "2026-03-15T14:03:32.004Z"
-last_activity: 2026-03-14 -- Roadmap revised (phase swap, terminology unified to D_harmful/D_std/D_unlabeled)
+status: in-progress
+stopped_at: Completed 01-data-pipeline/01-01-PLAN.md
+last_updated: "2026-03-15T15:06:15Z"
+last_activity: 2026-03-15 -- Executed 01-01: data preparation pipeline (compute_splits + prepare + litdata)
 progress:
   total_phases: 4
   completed_phases: 0
   total_plans: 2
-  completed_plans: 0
-  percent: 0
+  completed_plans: 1
+  percent: 50
 ---
 
 # Project State
@@ -26,28 +26,28 @@ See: .planning/PROJECT.md (updated 2026-03-13)
 ## Current Position
 
 Phase: 1 of 4 (Data Pipeline)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-03-14 -- Roadmap revised (phase swap, terminology unified to D_harmful/D_std/D_unlabeled)
+Plan: 1 of 2 in current phase
+Status: In progress — plan 01-01 complete, 01-02 pending
+Last activity: 2026-03-15 -- Executed 01-01: data preparation pipeline (compute_splits + prepare + litdata)
 
-Progress: [                    ] 0%
+Progress: [##########          ] 50%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
-- Average duration: -
-- Total execution time: 0 hours
+- Total plans completed: 1
+- Average duration: 28 min
+- Total execution time: 0.47 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 01-data-pipeline | 1/2 completed | 28 min | 28 min |
 
 **Recent Trend:**
-- Last 5 plans: -
-- Trend: -
+- Last 5 plans: 28 min
+- Trend: first data point
 
 *Updated after each plan completion*
 
@@ -63,6 +63,10 @@ Recent decisions affecting current work:
 - [Roadmap]: Masking grouped with architecture (not separate phase) because masking primitives are tightly coupled to HarmfulParamRegistry and SafeMoELayer
 - [Revision]: Swapped Phase 1/2 ordering -- Data Pipeline is now Phase 1, Model Architecture & Masking is Phase 2
 - [Revision]: Unified terminology across all planning files -- D_harmful (not "forget"), D_std (not "retain"), D_unlabeled (not "adjacent")
+- [01-01]: Used start_method='fork' in litdata.optimize() — spawn silently fails with in-memory tokenizer objects
+- [01-01]: Removed tests/safemoe/__init__.py — pytest namespace collision shadowed source safemoe package
+- [01-01]: Added test injection kwargs to prepare() (tokenizer, en_train, es_train, en_val, es_val) for testability without Qwen3 checkpoint
+- [01-01]: TokensLoader(block_size=N) required in StreamingDataset — TokensLoader() without block_size causes TypeError in ROI generation
 
 ### Pending Todos
 
@@ -71,10 +75,10 @@ None yet.
 ### Blockers/Concerns
 
 - [Research]: Load-balancing loss design for SGTM remains an open question -- standard MoE balance loss fights harmful-expert concentration
-- [Research]: Spanish TinyStories data source availability needs confirmation before Phase 1 execution
+- [Research]: Spanish TinyStories data source availability needs confirmation before Phase 1 execution (NOTE: parquet files confirmed to exist on disk — blocker resolved)
 
 ## Session Continuity
 
-Last session: 2026-03-15T14:03:31.999Z
-Stopped at: Phase 1 context updated (two-param split, Qwen3 tokenizer, get_loader interface)
-Resume file: .planning/phases/01-data-pipeline/01-CONTEXT.md
+Last session: 2026-03-15T15:06:15Z
+Stopped at: Completed 01-data-pipeline/01-01-PLAN.md
+Resume file: .planning/phases/01-data-pipeline/01-02-PLAN.md

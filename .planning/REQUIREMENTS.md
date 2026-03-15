@@ -23,7 +23,7 @@ Requirements for Milestone 1 (PT Phase Validation). Maps to roadmap phases.
 
 ### Data Pipeline
 
-- [ ] **DATA-01**: Data preparation script tokenizes `ffuuugor/tinystories-spanish` (tiktoken gpt2) and partitions into three splits: D_std (25% EN), D_harmful ((100-x)% ES), D_unlabeled (75% EN + x% ES), where x is a configurable sweep parameter; aligned with paper's `tinystories_tokenize_and_split.py`
+- [x] **DATA-01**: Data preparation script tokenizes `ffuuugor/tinystories-spanish` (tiktoken gpt2) and partitions into three splits: D_std (25% EN), D_harmful ((100-x)% ES), D_unlabeled (75% EN + x% ES), where x is a configurable sweep parameter; aligned with paper's `tinystories_tokenize_and_split.py`
 - [ ] **DATA-02**: `MultiDataLoader` wrapper provides per-split DataLoaders (D_std/D_harmful/D_unlabeled) with configurable upsample factors (`upsample_std`, `upsample_harmful`, `upsample_unlabeled`); consistent with LitGPT `DataModule` abstraction
 - [ ] **DATA-03**: Pre-generated `data_split_order` list (shuffled schedule of "D_std"/"D_harmful"/"D_unlabeled" step labels) controls training mix; each step draws from the corresponding split
 
@@ -69,7 +69,7 @@ Deferred to future milestones.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DATA-01 | Phase 1 | Pending |
+| DATA-01 | Phase 1 | Complete |
 | DATA-02 | Phase 1 | Pending |
 | DATA-03 | Phase 1 | Pending |
 | MOE-01 | Phase 2 | Pending |

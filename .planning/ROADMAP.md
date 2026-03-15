@@ -30,7 +30,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 2 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — prepare.py: litdata install, test stubs (RED), implement compute_splits(x,y) + tokenization to integer-keyed cache dirs (GREEN) [DATA-01]
+- [x] 01-01-PLAN.md — prepare.py: litdata install, test stubs (RED), implement compute_splits(x,y) + tokenization to integer-keyed cache dirs (GREEN) [DATA-01]
 - [ ] 01-02-PLAN.md — MultiDataLoader: test stubs (RED), implement datamodule.py with get_loader() registry interface and val_dataloaders() (GREEN) [DATA-02, DATA-03]
 
 ### Phase 2: Model Architecture & Masking
@@ -74,7 +74,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Data Pipeline | 0/2 | Not started | - |
+| 1. Data Pipeline | 1/2 | In progress | - |
 | 2. Model Architecture & Masking | 0/TBD | Not started | - |
 | 3. SGTM Training Loop | 0/TBD | Not started | - |
 | 4. Ablation & Evaluation | 0/TBD | Not started | - |
