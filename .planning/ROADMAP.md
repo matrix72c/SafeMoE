@@ -20,18 +20,18 @@ Decimal phases appear between their surrounding integers in numeric order.
 ## Phase Details
 
 ### Phase 1: Data Pipeline
-**Goal**: A tokenized TinyStories bilingual dataset partitioned into D_std/D_harmful/D_unlabeled splits with a configurable x% sweep parameter, served through per-split DataLoaders
+**Goal**: A tokenized TinyStories bilingual dataset partitioned into D_std/D_harmful/D_unlabeled splits with a two-parameter (x, y) sweep scheme, served through per-split DataLoaders via MultiDataLoader.get_loader()
 **Depends on**: Nothing (first phase)
 **Requirements**: DATA-01, DATA-02, DATA-03
 **Success Criteria** (what must be TRUE):
-  1. Running the data preparation script produces three on-disk splits (D_std, D_harmful, D_unlabeled) from TinyStories English+Spanish with the correct proportions (25% EN D_std, (100-x)% ES D_harmful, 75% EN + x% ES D_unlabeled) for a given x
-  2. MultiDataLoader yields batches from each split independently, with configurable upsample factors, and each batch is tagged with its split label (D_std/D_harmful/D_unlabeled)
-  3. A pre-generated data_split_order schedule controls the per-step training mix, and iterating through it draws from the correct split at each step
+  1. Running the data preparation script produces three on-disk splits (D_std, D_harmful, D_unlabeled) from TinyStories English+Spanish with the correct proportions for given x, y: D_std=y% EN, D_harmful=(100-x)% ES, D_unlabeled=(100-y)% EN + x% ES; cached at data/.cache/Qwen3-30B-A3B-Base/{x}-{y}/
+  2. MultiDataLoader.get_loader(split_name) returns a StreamingDataLoader for the named split; val_dataloaders() returns {"D_std": DataLoader, "D_harmful": DataLoader}; training loop manages its own iterators
+  3. Dynamic split sampling (random.choices with weights) lives in the Phase 3 training loop, not in MultiDataLoader; MultiDataLoader is a loader registry only
 **Plans**: 2 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Setup + prepare.py: env setup, test stubs (RED), implement compute_splits/prepare (GREEN) [DATA-01]
-- [ ] 01-02-PLAN.md — MultiDataLoader: test stubs (RED), implement datamodule.py with dynamic weighted sampling (GREEN) [DATA-02, DATA-03]
+- [ ] 01-01-PLAN.md — prepare.py: litdata install, test stubs (RED), implement compute_splits(x,y) + tokenization to integer-keyed cache dirs (GREEN) [DATA-01]
+- [ ] 01-02-PLAN.md — MultiDataLoader: test stubs (RED), implement datamodule.py with get_loader() registry interface and val_dataloaders() (GREEN) [DATA-02, DATA-03]
 
 ### Phase 2: Model Architecture & Masking
 **Goal**: A SafeMoE model with designatable harmful experts and verified masking primitives that correctly isolate gradient and activation flow
