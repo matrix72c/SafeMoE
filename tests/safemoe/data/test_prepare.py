@@ -139,9 +139,10 @@ def test_litdata_output_readable(tmp_path):
     assert (out_base / "D_harmful" / "train").exists()
 
     # StreamingDataset must be able to open the output
+    # block_size=4 → each sample is a tensor of 4 tokens (FakeTokenizer emits 5 tokens per story)
     d_std_train = StreamingDataset(
         input_dir=str(out_base / "D_std" / "train"),
-        item_loader=TokensLoader(),
+        item_loader=TokensLoader(block_size=4),
         shuffle=False,
     )
     first = d_std_train[0]
