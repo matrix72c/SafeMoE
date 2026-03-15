@@ -13,17 +13,28 @@ from safemoe.data.datamodule import MultiDataLoader
 # ---------------------------------------------------------------------------
 
 
+def _tokenize_row(data):
+    """Module-level function (picklable) that yields token tensors from a list of rows.
+
+    Must be at module level — litdata's spawn-based workers cannot pickle lambdas
+    or locally-defined functions. Using start_method='fork' as additional safety.
+    """
+    for row in data:
+        yield torch.tensor(row)
+
+
 def make_fake_split(base_path: Path, split_name: str, subdir: str = "train"):
     """Create a minimal LitData chunk at base_path/{split_name}/{subdir}/"""
     out = base_path / split_name / subdir
     out.mkdir(parents=True, exist_ok=True)
     optimize(
-        fn=lambda data: (torch.tensor(row) for row in data),
+        fn=_tokenize_row,
         inputs=[[list(range(10))] * 20],  # 20 sequences of 10 tokens
         output_dir=str(out),
         num_workers=1,
         chunk_bytes="1MB",
         item_loader=TokensLoader(),
+        start_method="fork",
     )
     return out
 
