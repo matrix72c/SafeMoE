@@ -38,14 +38,15 @@ created: 2026-03-14
 
 | Task ID | Plan | Wave | Requirement | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|-----------|-------------------|-------------|--------|
-| 1-01-01 | 01 | 0 | DATA-01 | unit | `pytest tests/safemoe/data/test_prepare.py::test_split_proportions -x` | ❌ W0 | ⬜ pending |
-| 1-01-02 | 01 | 0 | DATA-01 | unit | `pytest tests/safemoe/data/test_prepare.py::test_split_proportions_x50 -x` | ❌ W0 | ⬜ pending |
+| 1-01-01 | 01 | 0 | DATA-01 | unit | `pytest tests/safemoe/data/test_prepare.py::test_split_proportions_x0y25 -x` | ❌ W0 | ⬜ pending |
+| 1-01-02 | 01 | 0 | DATA-01 | unit | `pytest tests/safemoe/data/test_prepare.py::test_split_proportions_x50y25 -x` | ❌ W0 | ⬜ pending |
 | 1-01-03 | 01 | 1 | DATA-01 | integration | `pytest tests/safemoe/data/test_prepare.py::test_litdata_output_readable -x` | ❌ W0 | ⬜ pending |
-| 1-02-01 | 02 | 1 | DATA-02 | unit | `pytest tests/safemoe/data/test_datamodule.py::test_next_returns_tuple -x` | ❌ W0 | ⬜ pending |
-| 1-02-02 | 02 | 1 | DATA-02 | unit | `pytest tests/safemoe/data/test_datamodule.py::test_val_dataloaders_keys -x` | ❌ W0 | ⬜ pending |
-| 1-02-03 | 02 | 1 | DATA-02 | unit | `pytest tests/safemoe/data/test_datamodule.py::test_batch_shape -x` | ❌ W0 | ⬜ pending |
-| 1-03-01 | 02 | 1 | DATA-03 | unit | `pytest tests/safemoe/data/test_datamodule.py::test_sampling_weights -x` | ❌ W0 | ⬜ pending |
-| 1-03-02 | 02 | 1 | DATA-03 | unit | `pytest tests/safemoe/data/test_datamodule.py::test_seed_reproducibility -x` | ❌ W0 | ⬜ pending |
+| 1-01-04 | 01 | 1 | DATA-01 | unit | `pytest tests/safemoe/data/test_prepare.py::test_xy_keyed_cache -x` | ❌ W0 | ⬜ pending |
+| 1-02-01 | 02 | 2 | DATA-02 | unit | `pytest tests/safemoe/data/test_datamodule.py::test_get_loader_returns_dataloader -x` | ❌ W0 | ⬜ pending |
+| 1-02-02 | 02 | 2 | DATA-02 | unit | `pytest tests/safemoe/data/test_datamodule.py::test_val_dataloaders_keys -x` | ❌ W0 | ⬜ pending |
+| 1-02-03 | 02 | 2 | DATA-02 | unit | `pytest tests/safemoe/data/test_datamodule.py::test_no_next_method -x` | ❌ W0 | ⬜ pending |
+| 1-03-01 | 02 | 2 | DATA-03 | unit | `pytest tests/safemoe/data/test_datamodule.py::test_no_upsample_fields -x` | ❌ W0 | ⬜ pending |
+| 1-03-02 | 02 | 2 | DATA-03 | unit | `pytest tests/safemoe/data/test_datamodule.py::test_datamodule_interface -x` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -69,8 +70,8 @@ created: 2026-03-14
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| GPT-2 tokenizer checkpoint files present | DATA-01 | Filesystem dependency; tokenizer.json must exist at checkpoint dir before any tokenization | Run `ls checkpoints/gpt2/` — verify `tokenizer.json` or `tokenizer.model` present; if not, run `litgpt download gpt2 --tokenizer_only` |
-| Cache paths correctly keyed by x value | DATA-01 | Integration with real parquet files | Run `python -m safemoe.data.prepare --x 0` and `--x 25` and verify distinct dirs under `data/.cache/{tokenizer}/x0/` and `data/.cache/{tokenizer}/x25/` |
+| Qwen3 tokenizer checkpoint files present | DATA-01 | Filesystem dependency; tokenizer.json must exist at checkpoint dir before any tokenization | Run `ls checkpoints/Qwen3-30B-A3B-Base/` — verify `tokenizer.json` present (already confirmed on disk) |
+| Cache paths correctly keyed by x-y values | DATA-01 | Integration with real parquet files | Run `python -m safemoe.data.prepare --x 0 --y 25` and `--x 50 --y 25` and verify distinct dirs under `data/.cache/Qwen3-30B-A3B-Base/0-25/` and `50-25/` |
 
 ---
 
