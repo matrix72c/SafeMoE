@@ -16,6 +16,7 @@ import lightning as L
 import torch
 import torch.nn as nn
 from lightning.fabric.strategies import FSDPStrategy
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from lightning.fabric.utilities.throughput import ThroughputMonitor, measure_flops
 from torch import Tensor
 from torch.utils.data import DataLoader
@@ -388,12 +389,16 @@ def main(
     model = fabric.setup(model)
 
     # SGTM: build registry AFTER fabric.setup() so params are materialized real tensors.
-    # fabric.setup() wraps the model in _FabricModule, and on multi-GPU DDP also wraps
-    # in DistributedDataParallel — both add name prefixes that break the expert regex.
-    # Unwrap both layers to reach the raw GPT with original parameter names.
-    _raw = model._forward_module  # _FabricModule -> DDP (multi-GPU) or GPT (single)
-    if hasattr(_raw, "module"):   # DDP/FSDP -> unwrap one more level to raw GPT
-        _raw = _raw.module
+    # fabric.setup() wraps the model in _FabricModule.  On multi-GPU:
+    #   - DDP: _forward_module is a DistributedDataParallel that adds a "module."
+    #          prefix to all parameter names — unwrap one level to restore them.
+    #   - FSDP: _forward_module is FullyShardedDataParallel.  With use_orig_params=True
+    #           (Lightning default), FSDP already exposes original parameter names, so
+    #           we must NOT unwrap: accessing .module gives the raw GPT whose params
+    #           are on meta device (FSDP moved them into flat shards).
+    _raw = model._forward_module  # _FabricModule -> FSDP/DDP/raw GPT
+    if hasattr(_raw, "module") and not isinstance(_raw, FSDP):
+        _raw = _raw.module        # DDP only — strip the "module." prefix
     registry = HarmfulParamRegistry(_raw, config)
 
     # SGTM: dual optimizer setup AFTER fabric.setup(model) — params are now materialized.
@@ -409,6 +414,10 @@ def main(
     train_dataloader, val_dataloader = get_dataloaders(fabric, data, tokenizer, train, model.max_seq_length)
     # SGTM: only val_dataloader is fabric-wrapped; split loaders are accessed via data.get_loader()
     val_dataloader = fabric.setup_dataloaders(val_dataloader)
+
+    # SGTM EVAL-03: extract per-split val loaders for mid-training ablation evaluation
+    # val_dataloaders() returns {"D_std": DataLoader, "D_harmful": DataLoader}
+    val_loaders_for_eval = data.val_dataloaders()
 
     if initial_checkpoint_dir:
         fabric.load_raw(initial_checkpoint_dir / "lit_model.pth", model)
@@ -466,6 +475,8 @@ def main(
         upsample_std=upsample_std,
         upsample_harmful=upsample_harmful,
         upsample_unlabeled=upsample_unlabeled,
+        registry=registry,
+        val_loaders=val_loaders_for_eval,
     )
 
     # Save final checkpoint
@@ -511,6 +522,9 @@ def fit(
     upsample_std: float = 1.0,
     upsample_harmful: float = 1.0,
     upsample_unlabeled: float = 1.0,
+    # SGTM: EVAL-03 — mid-training ablation evaluation
+    registry: Optional["HarmfulParamRegistry"] = None,
+    val_loaders: Optional[dict] = None,
 ) -> None:
     model = state["model"]
     # SGTM: dual optimizers from state dict
@@ -589,8 +603,8 @@ def fit(
                 is_accumulating = micro_batch_idx < accum_iters - 1
 
                 train_data = next(split_iters[split_label])
-                input_ids = train_data[:, 0 : model.max_seq_length].contiguous().long()
-                targets = train_data[:, 1 : (model.max_seq_length + 1)].contiguous().long()
+                input_ids = train_data[:, 0 : model.max_seq_length].contiguous().long().to(fabric.device)
+                targets = train_data[:, 1 : (model.max_seq_length + 1)].contiguous().long().to(fabric.device)
 
                 with fabric.no_backward_sync(model, enabled=is_accumulating):
                     logits = model(input_ids)
@@ -650,7 +664,6 @@ def fit(
                 loss_key: loss_val,
                 "iter": state["iter_num"],
                 "step": state["step_count"],
-                "split_label": split_label,
                 "iter_time": t1 - iter_t0,
                 "remaining_time": (
                     (t1 - total_t0) / (state["iter_num"] - initial_iter) * (max_iters - state["iter_num"])
@@ -687,6 +700,12 @@ def fit(
 
         if train.save_interval is not None and state["step_count"] % train.save_interval == 0:
             save_checkpoint(fabric, state, tokenizer_dir, out_dir / f"step-{state['step_count']:08d}" / "lit_model.pth")
+            # SGTM EVAL-03: mid-training ablation evaluation at each checkpoint
+            if registry is not None and val_loaders is not None:
+                evaluate_with_ablation(
+                    fabric, model, registry, val_loaders,
+                    iter_num=state["iter_num"], eval_args=eval,
+                )
 
     # Final validation
     if eval.final_validation:
@@ -694,6 +713,51 @@ def fit(
         metrics = {"val_loss": val_loss, "val_ppl": math.exp(val_loss)}
         fabric.log_dict(metrics, step=state["iter_num"])
         fabric.print(f"Final evaluation | val loss: {val_loss.item():.3f} | val ppl: {math.exp(val_loss):.3f}")
+
+
+# ---------------------------------------------------------------------------
+# evaluate_with_ablation() — EVAL-03: in-training ablation evaluation
+# ---------------------------------------------------------------------------
+
+
+def evaluate_with_ablation(
+    fabric: L.Fabric,
+    model: nn.Module,
+    registry: "HarmfulParamRegistry",
+    val_loaders: dict,
+    iter_num: int,
+    eval_args: Optional["EvalArgs"] = None,
+) -> None:
+    """Temporarily ablate theta_harmful, run per-split validation, restore weights.
+
+    Implements EVAL-03: called at save_interval checkpoints to track isolation progress.
+    val_loaders is {"D_std": DataLoader, "D_harmful": DataLoader} — no D_unlabeled entry.
+
+    The try/finally guard guarantees weights are restored even if validate() raises.
+    model.train() is explicitly called in finally to prevent eval mode leaking into
+    the training loop (validate() sets eval mode but this function owns the restore).
+    """
+    harmful_params = registry.parameters_by_type("theta_harmful")
+    saved = [p.data.clone() for p in harmful_params]
+    max_iters = eval_args.max_iters if eval_args is not None else 100
+    try:
+        for p in harmful_params:
+            p.data.zero_()
+        metrics: dict = {}
+        for split_name, loader in val_loaders.items():
+            # val_loaders has D_std and D_harmful only — no D_unlabeled (user decision)
+            val_loss = validate(fabric, model, loader, max_iters=max_iters, verbose=False)
+            ppl = math.exp(val_loss.item())
+            metrics[f"ablated_val_ppl_{split_name}"] = ppl
+    finally:
+        for p, saved_data in zip(harmful_params, saved):
+            p.data.copy_(saved_data)
+        model.train()  # restore training mode — validate() sets eval but we own the restore
+    fabric.log_dict(metrics, step=iter_num)
+    fabric.print(
+        f"Ablation eval (iter {iter_num}): "
+        + ", ".join(f"{k}={v:.3f}" for k, v in metrics.items())
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -803,7 +867,18 @@ def save_checkpoint(fabric, state, tokenizer_dir, checkpoint_file):
     model = state["model"]
     checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
     fabric.print(f"Saving checkpoint to {str(checkpoint_file)!r}")
-    fabric.save(checkpoint_file, state)
+    if isinstance(fabric.strategy, FSDPStrategy):
+        # FSDP's optim_state_dict() requires each optimizer to own ALL FSDP-sharded params.
+        # With split optimizers (theta_harmful / theta_std) each owns only a subset, so
+        # we save model weights + scalars only — optimizer state cannot be consolidated.
+        fabric.save(checkpoint_file, {
+            "model": state["model"],
+            "iter_num": state["iter_num"],
+            "step_count": state["step_count"],
+            "split_label": state["split_label"],
+        })
+    else:
+        fabric.save(checkpoint_file, state)
     if fabric.global_rank == 0:
         save_hyperparameters(setup, checkpoint_file.parent)
         if tokenizer_dir is not None:

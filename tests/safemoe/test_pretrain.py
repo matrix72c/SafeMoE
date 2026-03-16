@@ -121,6 +121,15 @@ class _MockMultiDataLoader:
         ds = _SynthDataset(5, self._block_size, self._vocab_size)
         return [DataLoader(ds, batch_size=1, drop_last=False)]
 
+    def val_dataloaders(self) -> dict:
+        """Returns {D_std: DataLoader, D_harmful: DataLoader} — mirrors MultiDataLoader API."""
+        ds_std = _SynthDataset(5, self._block_size, self._vocab_size)
+        ds_harmful = _SynthDataset(5, self._block_size, self._vocab_size)
+        return {
+            "D_std": DataLoader(ds_std, batch_size=1, drop_last=False),
+            "D_harmful": DataLoader(ds_harmful, batch_size=1, drop_last=False),
+        }
+
 
 # ---------------------------------------------------------------------------
 # Helper: build Fabric, model, state, and maskers for fit() behavioral tests
