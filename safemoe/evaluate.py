@@ -52,13 +52,24 @@ def _get_val_loaders(ckpt_dir: Path, config: SafeMoEConfig, data_mock=None) -> d
         return data_mock.val_dataloaders()
 
     # Real path: construct MultiDataLoader from saved config
+    from litgpt.tokenizer import Tokenizer
     from safemoe.data.datamodule import MultiDataLoader
 
     x = getattr(config, "x", 0)
     y = getattr(config, "y", 25)
+
+    # Load tokenizer from the dir recorded in hyperparameters.yaml so the
+    # cache path resolves to the right tokenizer_name subdirectory.
+    tokenizer = None
+    hp_path = ckpt_dir / "hyperparameters.yaml"
+    if hp_path.exists():
+        hp = yaml.safe_load(hp_path.read_text())
+        tokenizer_dir = hp.get("tokenizer_dir")
+        if tokenizer_dir:
+            tokenizer = Tokenizer(Path(tokenizer_dir))
+
     loader = MultiDataLoader(x=x, y=y)
-    loader.connect(tokenizer=None, batch_size=4, max_seq_length=config.block_size)
-    loader.setup()
+    loader.connect(tokenizer=tokenizer, batch_size=4, max_seq_length=config.block_size)
     return loader.val_dataloaders()
 
 
