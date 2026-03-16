@@ -1,0 +1,23 @@
+# safemoe/configs/safemoe-tinystories.yaml
+# Small TinyStories MoE experiment config for CPU-only unit tests.
+# Based on config_hub/pretrain/tinystories.yaml (stories15M) with MoE fields added.
+name: safemoe-tinystories
+block_size: 256
+padded_vocab_size: 32000
+n_layer: 4
+n_head: 4
+n_query_groups: 4
+n_embd: 128
+head_size: 32
+rotary_percentage: 1.0
+parallel_residual: false
+bias: false
+norm_class_name: RMSNorm
+mlp_class_name: LLaMAMoE
+moe_intermediate_size: 256
+n_expert: 8
+n_expert_per_token: 2
+# SafeMoEConfig-specific fields:
+harmful_expert_indices: [0, 1]
+num_harmful_experts: 2
+harmful_attn_heads: []
