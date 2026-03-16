@@ -77,7 +77,14 @@ Plans:
   2. Per-split perplexity evaluation shows that post-ablation D_harmful-split (Spanish) perplexity increases significantly while D_std-split (English) perplexity remains near the pre-ablation baseline
   3. Routing attribution histograms show that D_harmful-split tokens preferentially activate theta_harmful experts during training, confirming the router learned to route harmful-domain tokens to designated experts
   4. Mid-training ablation evaluation at periodic checkpoints shows isolation improving over training (D_harmful-split perplexity delta between ablated/non-ablated models grows as training progresses)
-**Plans**: TBD
+**Plans**: 5 plans
+
+Plans:
+- [ ] 04-01-PLAN.md — TDD RED: test stubs for TRAIN-04 (test_ablate.py), EVAL-01+EVAL-02 (test_evaluate.py), EVAL-03 (test_pretrain.py append) [TRAIN-04, EVAL-01, EVAL-02, EVAL-03]
+- [ ] 04-02-PLAN.md — TRAIN-04 GREEN: ablate.py (ablate() + setup()) + __main__.py ablate subcommand [TRAIN-04]
+- [ ] 04-03-PLAN.md — EVAL-01+EVAL-02 GREEN: SafeMoELayer._last_indices + evaluate.py (perplexity + routing) + __main__.py evaluate subcommand [EVAL-01, EVAL-02]
+- [ ] 04-04-PLAN.md — EVAL-03 GREEN: evaluate_with_ablation() in pretrain.py + fit() registry/val_loaders wiring [EVAL-03]
+- [ ] 04-05-PLAN.md — Human verification: full evaluation pipeline on a real trained checkpoint [TRAIN-04, EVAL-01, EVAL-02, EVAL-03]
 
 ## Progress
 
@@ -90,4 +97,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 | 1. Data Pipeline | 2/2 | Complete   | 2026-03-15 |
 | 2. Model Architecture & Masking | 4/4 | Complete   | 2026-03-16 |
 | 3. SGTM Training Loop | 4/5 | In Progress|  |
-| 4. Ablation & Evaluation | 0/TBD | Not started | - |
+| 4. Ablation & Evaluation | 0/5 | Not started | - |
