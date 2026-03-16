@@ -38,7 +38,7 @@ Requirements for Milestone 1 (PT Phase Validation). Maps to roadmap phases.
 
 - [x] **EVAL-01**: Per-split perplexity evaluation (D_std / D_harmful / D_unlabeled) on validation sets before and after ablation, mirroring paper's `evaluate_all_datasets()` structure
 - [x] **EVAL-02**: Routing attribution analysis -- per-token histogram of which expert type (theta_harmful vs theta_std) each data split preferentially activates; logged to W&B or TensorBoard
-- [ ] **EVAL-03**: Mid-training ablation evaluation -- at each eval checkpoint, temporarily ablate theta_harmful and evaluate the ablated model, then restore; tracks isolation progress over training
+- [x] **EVAL-03**: Mid-training ablation evaluation -- at each eval checkpoint, temporarily ablate theta_harmful and evaluate the ablated model, then restore; tracks isolation progress over training
 
 ## v2 Requirements
 
@@ -86,7 +86,7 @@ Deferred to future milestones.
 | TRAIN-04 | Phase 4 | Complete |
 | EVAL-01 | Phase 4 | Complete |
 | EVAL-02 | Phase 4 | Complete |
-| EVAL-03 | Phase 4 | Pending |
+| EVAL-03 | Phase 4 | Complete |
 
 **Coverage:**
 - v1 requirements: 18 total
