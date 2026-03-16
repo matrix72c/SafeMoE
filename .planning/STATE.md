@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-01-PLAN.md
-last_updated: "2026-03-16T05:13:15.263Z"
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-03-16T05:20:15.440Z"
 last_activity: "2026-03-16 -- Executed 02-03: HarmfulParamRegistry in safemoe/masking.py with GradientMasker/ActivationMasker stubs"
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 9
-  completed_plans: 7
+  completed_plans: 8
   percent: 67
 ---
 
@@ -57,6 +57,7 @@ Progress: [###############     ] 67%
 | Phase 02-model-architecture-masking P04 | 525668 | 2 tasks | 1 files |
 | Phase 02-model-architecture-masking P04 | 8 | 2 tasks | 1 files |
 | Phase 03-sgtm-training-loop P01 | 3 | 2 tasks | 2 files |
+| Phase 03-sgtm-training-loop P02 | 6 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -88,6 +89,8 @@ Recent decisions affecting current work:
 - [Phase 03-01]: test_attn_head_activation_masking verifies flag-state only — actual head output zeroing assertion deferred to Plan 03-03 Task 2
 - [Phase 03-01]: _wrap_attn_forward installs a pass-through stub in 03-01; Plan 03-02 replaces with real head-output zeroing via SafeCausalSelfAttention
 - [Phase 03-01]: ActivationMasker(model) backward-compatible; _attn_layers empty list when config is None or harmful_attn_heads is []
+- [Phase 03-sgtm-training-loop]: SafeCausalSelfAttention.forward replicates parent body not super() — y tensor is (B,T,n_head,hs) post-SDPA; head zeroing at y[:, :, head_idx, :] before reshape
+- [Phase 03-sgtm-training-loop]: torch.compile removed from safemoe/pretrain.py — Python bool flag _activation_masking_enabled traced and constant-folded by compiler
 
 ### Pending Todos
 
@@ -100,6 +103,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T05:13:15.257Z
-Stopped at: Completed 03-01-PLAN.md
+Last session: 2026-03-16T05:20:15.434Z
+Stopped at: Completed 03-02-PLAN.md
 Resume file: None
