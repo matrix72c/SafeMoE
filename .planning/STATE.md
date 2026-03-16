@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 2 context gathered
-last_updated: "2026-03-16T01:31:49.553Z"
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-03-16T02:02:07.834Z"
 last_activity: "2026-03-15 -- Executed 01-01: data preparation pipeline (compute_splits + prepare + litdata)"
 progress:
   total_phases: 4
   completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
+  total_plans: 6
+  completed_plans: 3
   percent: 50
 ---
 
@@ -51,6 +51,7 @@ Progress: [##########          ] 50%
 
 *Updated after each plan completion*
 | Phase 01-data-pipeline P02 | 6 | 2 tasks | 2 files |
+| Phase 02-model-architecture-masking P01 | 3 | 4 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -70,6 +71,9 @@ Recent decisions affecting current work:
 - [01-01]: TokensLoader(block_size=N) required in StreamingDataset — TokensLoader() without block_size causes TypeError in ROI generation
 - [Phase 01-02]: get_loader() returns DataLoader directly; training loop manages its own iter() — no next() on MultiDataLoader
 - [Phase 01-02]: Module-level _tokenize_row() in tests replaces lambda — litdata spawn workers cannot pickle local closures; start_method='fork' added as safety
+- [Phase 02-01]: No tests/safemoe/__init__.py to avoid pytest namespace collision (Phase 1 lesson applied)
+- [Phase 02-01]: id()-based set comparisons for nn.Parameter identity in registry tests (avoids tensor __eq__ pitfall)
+- [Phase 02-01]: ActivationMasker test uses _activation_masking_enabled flag checks, not per-expert output tensors
 
 ### Pending Todos
 
@@ -82,6 +86,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T01:31:49.547Z
-Stopped at: Phase 2 context gathered
-Resume file: .planning/phases/02-model-architecture-masking/02-CONTEXT.md
+Last session: 2026-03-16T02:02:07.828Z
+Stopped at: Completed 02-01-PLAN.md
+Resume file: None

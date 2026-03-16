@@ -9,17 +9,17 @@ Requirements for Milestone 1 (PT Phase Validation). Maps to roadmap phases.
 
 ### MoE Architecture
 
-- [ ] **MOE-01**: SafeMoEConfig extends LitGPT `Config` with `harmful_expert_indices`, `num_harmful_experts`, `harmful_attn_heads` fields
-- [ ] **MOE-02**: HarmfulParamRegistry registers and manages full-model parameter -> theta_harmful/theta_std mapping (covers MoE experts, attention heads, and all other layers); exposes `parameters_by_type(sgtm_split)` interface for optimizer and masker use
-- [ ] **MOE-03**: SafeMoELayer subclasses `LLaMAMoE` from `litgpt/model.py`, integrates HarmfulParamRegistry for per-expert routing and designation
-- [ ] **MOE-04**: Harmful expert initialization strategy is configurable (random init vs. copy weights from existing std experts)
+- [x] **MOE-01**: SafeMoEConfig extends LitGPT `Config` with `harmful_expert_indices`, `num_harmful_experts`, `harmful_attn_heads` fields
+- [x] **MOE-02**: HarmfulParamRegistry registers and manages full-model parameter -> theta_harmful/theta_std mapping (covers MoE experts, attention heads, and all other layers); exposes `parameters_by_type(sgtm_split)` interface for optimizer and masker use
+- [x] **MOE-03**: SafeMoELayer subclasses `LLaMAMoE` from `litgpt/model.py`, integrates HarmfulParamRegistry for per-expert routing and designation
+- [x] **MOE-04**: Harmful expert initialization strategy is configurable (random init vs. copy weights from existing std experts)
 
 ### Masking Infrastructure
 
-- [ ] **MASK-01**: GradientMasker -- after backward pass on D_harmful batch, sets theta_std parameter gradients to `None` (post-backward zeroing, not detach-in-forward), ensuring only theta_harmful parameters update
-- [ ] **MASK-02**: ActivationMasker -- zeros theta_harmful expert outputs during D_std forward pass (skips harmful expert dispatch), forcing model to rely solely on theta_std
-- [ ] **MASK-03**: Dual optimizer param groups (separate AdamW for theta_harmful and theta_std) with `zero_grad(set_to_none=True)` to prevent Adam momentum corruption from zero gradients
-- [ ] **MASK-04**: Unit tests confirming: grad norm = 0 (or grad is None) for masked params after D_harmful backward; grad norm > 0 for unmasked params; theta_harmful output = 0 during D_std forward
+- [x] **MASK-01**: GradientMasker -- after backward pass on D_harmful batch, sets theta_std parameter gradients to `None` (post-backward zeroing, not detach-in-forward), ensuring only theta_harmful parameters update
+- [x] **MASK-02**: ActivationMasker -- zeros theta_harmful expert outputs during D_std forward pass (skips harmful expert dispatch), forcing model to rely solely on theta_std
+- [x] **MASK-03**: Dual optimizer param groups (separate AdamW for theta_harmful and theta_std) with `zero_grad(set_to_none=True)` to prevent Adam momentum corruption from zero gradients
+- [x] **MASK-04**: Unit tests confirming: grad norm = 0 (or grad is None) for masked params after D_harmful backward; grad norm > 0 for unmasked params; theta_harmful output = 0 during D_std forward
 
 ### Data Pipeline
 
@@ -72,14 +72,14 @@ Deferred to future milestones.
 | DATA-01 | Phase 1 | Complete |
 | DATA-02 | Phase 1 | Complete |
 | DATA-03 | Phase 1 | Complete |
-| MOE-01 | Phase 2 | Pending |
-| MOE-02 | Phase 2 | Pending |
-| MOE-03 | Phase 2 | Pending |
-| MOE-04 | Phase 2 | Pending |
-| MASK-01 | Phase 2 | Pending |
-| MASK-02 | Phase 2 | Pending |
-| MASK-03 | Phase 2 | Pending |
-| MASK-04 | Phase 2 | Pending |
+| MOE-01 | Phase 2 | Complete |
+| MOE-02 | Phase 2 | Complete |
+| MOE-03 | Phase 2 | Complete |
+| MOE-04 | Phase 2 | Complete |
+| MASK-01 | Phase 2 | Complete |
+| MASK-02 | Phase 2 | Complete |
+| MASK-03 | Phase 2 | Complete |
+| MASK-04 | Phase 2 | Complete |
 | TRAIN-01 | Phase 3 | Pending |
 | TRAIN-02 | Phase 3 | Pending |
 | TRAIN-03 | Phase 3 | Pending |
