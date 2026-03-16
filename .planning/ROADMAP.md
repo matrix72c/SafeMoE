@@ -59,12 +59,14 @@ Plans:
   1. Running `python -m safemoe pretrain --config <yaml>` launches training on TinyStories bilingual data and produces a checkpoint file, consistent with LitGPT's jsonargparse conventions
   2. During training, D_harmful-labeled steps apply GradientMasker (only theta_harmful updates), D_std-labeled steps apply ActivationMasker (theta_harmful zeroed in forward), and D_unlabeled-labeled steps perform standard forward+backward with no masking
   3. Training loss decreases over steps for all three split types, confirming the model learns from all data streams without masking errors stalling optimization
-**Plans**: 3 plans
+**Plans**: 5 plans (3 original + 2 gap closure)
 
 Plans:
 - [ ] 03-01-PLAN.md — TDD RED: test stubs for TRAIN-01/02/03 + extend GradientMasker/ActivationMasker for attn head masking (GREEN for masker tests) [TRAIN-01, TRAIN-02]
 - [ ] 03-02-PLAN.md — Fork litgpt/pretrain.py: dual optimizer setup, 3-path SGTM branching, split sampling, pretrain loop unit tests GREEN [TRAIN-01, TRAIN-02]
 - [ ] 03-03-PLAN.md — CLI entry point safemoe/__main__.py + YAML config update + test_pretrain_produces_checkpoint GREEN [TRAIN-03]
+- [ ] 03-04-PLAN.md — Gap closure: upgrade 4 import-stub tests to behavioral assertions + update REQUIREMENTS.md TRAIN-02 description [TRAIN-01, TRAIN-02]
+- [ ] 03-05-PLAN.md — Gap closure: human verification of loss convergence across all three split types on real training data [TRAIN-01, TRAIN-02, TRAIN-03]
 
 ### Phase 4: Ablation & Evaluation
 **Goal**: A complete evaluation pipeline that ablates harmful experts and measures whether knowledge isolation succeeded -- the validation of SafeMoE's core thesis
@@ -87,5 +89,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 |-------|----------------|--------|-----------|
 | 1. Data Pipeline | 2/2 | Complete   | 2026-03-15 |
 | 2. Model Architecture & Masking | 4/4 | Complete   | 2026-03-16 |
-| 3. SGTM Training Loop | 3/3 | Complete   | 2026-03-16 |
+| 3. SGTM Training Loop | 3/5 | Gap closure in progress | 2026-03-16 |
 | 4. Ablation & Evaluation | 0/TBD | Not started | - |
