@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-03-16T02:08:30Z"
+stopped_at: Completed 02-04-PLAN.md
+last_updated: "2026-03-16T02:17:40.069Z"
 last_activity: "2026-03-16 -- Executed 02-03: HarmfulParamRegistry in safemoe/masking.py with GradientMasker/ActivationMasker stubs"
 progress:
   total_phases: 4
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 6
-  completed_plans: 5
+  completed_plans: 6
   percent: 67
 ---
 
@@ -54,6 +54,8 @@ Progress: [###############     ] 67%
 | Phase 02-model-architecture-masking P01 | 3 | 4 tasks | 5 files |
 | Phase 02-model-architecture-masking P02 | 2 | 2 tasks | 2 files |
 | Phase 02-model-architecture-masking P03 | 3 | 1 task | 1 file |
+| Phase 02-model-architecture-masking P04 | 525668 | 2 tasks | 1 files |
+| Phase 02-model-architecture-masking P04 | 8 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -80,6 +82,8 @@ Recent decisions affecting current work:
 - [Phase 02-model-architecture-masking]: [02-02]: Lazy import of SafeMoELayer inside SafeMoEConfig.mlp_class property body breaks circular import
 - [Phase 02-03]: qkv.weight in theta_std (full parameter) + _qkv_harmful_metadata (row slices) — duality intentional for Phase 2/3 masker scope split
 - [Phase 02-03]: GradientMasker(registry), ActivationMasker(model) constructor signatures match RED test stubs exactly
+- [Phase 02-model-architecture-masking]: [Phase 02-04]: ActivationMasker.__init__ takes model + optional registry=None — test stubs call ActivationMasker(model) but plan shows (model, registry); registry optional for symmetry and Phase 3 extension
+- [Phase 02-model-architecture-masking]: [Phase 02-04]: p.grad = None (not zero_()) in GradientMasker.mask() — None prevents AdamW exp_avg/exp_avg_sq accumulation for theta_std entirely; zero_() would still trigger Adam state creation on next step()
 
 ### Pending Todos
 
@@ -92,6 +96,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T02:08:30Z
-Stopped at: Completed 02-03-PLAN.md
+Last session: 2026-03-16T02:17:40.063Z
+Stopped at: Completed 02-04-PLAN.md
 Resume file: None
