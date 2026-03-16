@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-03-16T15:07:12.703Z"
+stopped_at: Completed 04-04-PLAN.md — evaluate_with_ablation() EVAL-03 implementation
+last_updated: "2026-03-16T15:10:28.074Z"
 last_activity: "2026-03-16 -- Verified 03-05: loss convergence confirmed on real TinyStories data"
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 16
-  completed_plans: 14
+  completed_plans: 15
   percent: 100
 ---
 
@@ -62,6 +62,7 @@ Progress: [██████████] 100%
 | Phase 04-ablation-evaluation P03 | 14 | 3 tasks | 4 files |
 | Phase 04-ablation-evaluation P02 | 15 | 2 tasks | 3 files |
 | Phase 04-ablation-evaluation P01 | 8 | 3 tasks | 3 files |
+| Phase 04-ablation-evaluation P04 | 20 | 1 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -108,6 +109,8 @@ Recent decisions affecting current work:
 - [Phase 04-01]: D_unlabeled metrics excluded from all evaluation outputs — user decision to skip D_unlabeled perplexity/routing tracking
 - [Phase 04-01]: data_mock parameter on evaluate_perplexity() and routing_attribution() — testability without real data files; mirrors _MockMultiDataLoader pattern from test_pretrain.py
 - [Phase 04-01]: evaluate_with_ablation() takes eval_args: EvalArgs and calls fabric.log_dict() exactly once with combined D_std and D_harmful PPL metrics
+- [Phase 04-04]: evaluate_with_ablation() uses try/finally to guarantee weight restore even on exception; model.train() in finally owns eval-mode cleanup
+- [Phase 04-04]: val_loaders passed as Optional dict to fit() — None skips ablation eval, preserving backward compatibility
 
 ### Pending Todos
 
@@ -120,6 +123,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T15:07:12.697Z
-Stopped at: Completed 04-01-PLAN.md
+Last session: 2026-03-16T15:10:28.068Z
+Stopped at: Completed 04-04-PLAN.md — evaluate_with_ablation() EVAL-03 implementation
 Resume file: None
