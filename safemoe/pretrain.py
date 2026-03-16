@@ -379,13 +379,15 @@ def main(
             safe_attn.__dict__.update(module.__dict__)
             setattr(parent, attr, safe_attn)
 
+    # SGTM: HarmfulParamRegistry must be built BEFORE fabric.setup(model) because
+    # fabric wraps the model and prefixes all parameter names with "_forward_module.",
+    # which breaks the regex patterns used in HarmfulParamRegistry.
+    registry = HarmfulParamRegistry(model, config)
+
     # SGTM: REMOVED torch.compile(model) — incompatible with Python bool flag checks
     # (per RESEARCH.md anti-pattern: torch.compile traces through Python booleans, making
     # dynamic _activation_masking_enabled flag checks ineffective)
     model = fabric.setup(model)
-
-    # SGTM: HarmfulParamRegistry classifies parameters into theta_harmful and theta_std
-    registry = HarmfulParamRegistry(model, config)
 
     # SGTM: dual optimizer setup (Pattern 3 from RESEARCH.md)
     extra_kwargs = {"fused": fabric.device.type == "cuda"}
@@ -515,14 +517,20 @@ def fit(
 
     throughput = ThroughputMonitor(fabric, window_size=5)
 
-    with torch.device("meta"):
-        meta_model = GPT(model.config)
-        x = torch.randint(0, 1, (train.micro_batch_size, meta_model.max_seq_length))
-        model_fwd = lambda: meta_model(x)  # noqa: F821
-        model_loss = lambda y: chunked_cross_entropy(y, x, chunk_size=0)  # noqa: F821
-        measured_flops = measure_flops(meta_model, model_fwd, model_loss)
-        fabric.print(f"Measured TFLOPs: {measured_flops * fabric.world_size / 1e12:.2f}")
-        del meta_model, x
+    try:
+        with torch.device("meta"):
+            meta_model = GPT(model.config)
+            x = torch.randint(0, 1, (train.micro_batch_size, meta_model.max_seq_length))
+            model_fwd = lambda: meta_model(x)  # noqa: F821
+            model_loss = lambda y: chunked_cross_entropy(y, x, chunk_size=0)  # noqa: F821
+            measured_flops = measure_flops(meta_model, model_fwd, model_loss)
+            fabric.print(f"Measured TFLOPs: {measured_flops * fabric.world_size / 1e12:.2f}")
+            del meta_model, x
+    except (NotImplementedError, RuntimeError):
+        # MoE models use torch.where() which is not supported on meta device.
+        # Fall back to zero so ThroughputMonitor still works (it uses flops if non-zero).
+        measured_flops = 0
+        fabric.print("FLOP measurement skipped (meta device does not support MoE ops)")
 
     max_tokens_per_device = train.max_tokens // fabric.world_size
     tokens_per_iter = train.micro_batch_size * model.max_seq_length
