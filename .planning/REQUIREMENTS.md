@@ -30,7 +30,7 @@ Requirements for Milestone 1 (PT Phase Validation). Maps to roadmap phases.
 ### Training Loop
 
 - [x] **TRAIN-01**: Fork `litgpt/pretrain.py` -> `safemoe/pretrain.py` implementing SGTM 3-path branching per step label: D_harmful -> gradient masking (MASK-01 post-backward), D_std -> activation masking (MASK-02 in forward), D_unlabeled -> standard forward+backward
-- [x] **TRAIN-02**: `sgtm_mode` scalar passed as part of batch dict to model forward; `adjust_gradients(sgtm_mode)` called after each backward pass before optimizer step
+- [x] **TRAIN-02**: Per-step split label sampled via `random.choices(SPLIT_LABELS, weights=[upsample_std, upsample_harmful, upsample_unlabeled])` once per optimizer step; 3-path `if/elif/else` dispatch in `fit()` calls `gradient_masker.mask()` post-backward for D_harmful, brackets the micro-batch window with `activation_masker.enable()/disable()` (try/finally) for D_std, and runs standard forward+backward with both optimizers stepping for D_unlabeled
 - [x] **TRAIN-03**: CLI entry point `python -m safemoe pretrain` with YAML config support, consistent with LitGPT's jsonargparse conventions and config pattern from `configs/tinystories/`
 - [ ] **TRAIN-04**: `ablate()` utility zeros theta_harmful weights in-place (`set grad/weights = 0`) and saves the ablated checkpoint as a separate file for inference evaluation
 
