@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-02-PLAN.md
-last_updated: "2026-03-16T05:20:15.440Z"
+stopped_at: Completed 03-03-PLAN.md
+last_updated: "2026-03-16T05:36:00.741Z"
 last_activity: "2026-03-16 -- Executed 02-03: HarmfulParamRegistry in safemoe/masking.py with GradientMasker/ActivationMasker stubs"
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 9
-  completed_plans: 8
-  percent: 67
+  completed_plans: 9
+  percent: 100
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-13)
 
 **Core value:** Harmful knowledge must be fully containable in a designatable set of MoE parameters that can be zeroed out at inference time without degrading general model capability.
-**Current focus:** Phase 2 - Model Architecture & Masking
+**Current focus:** Phase 3 complete - SGTM Training Loop
 
 ## Current Position
 
-Phase: 2 of 4 (Model Architecture & Masking)
-Plan: 3 of 4 in current phase
-Status: In progress — plans 02-01, 02-02, 02-03 complete, 02-04 pending
-Last activity: 2026-03-16 -- Executed 02-03: HarmfulParamRegistry in safemoe/masking.py with GradientMasker/ActivationMasker stubs
+Phase: 3 of 4 (SGTM Training Loop)
+Plan: 3 of 3 in current phase
+Status: Phase 3 complete — all plans 03-01, 03-02, 03-03 complete
+Last activity: 2026-03-16 -- Executed 03-03: CLI entry point + checkpoint test + pretrain bug fixes
 
-Progress: [###############     ] 67%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -58,6 +58,7 @@ Progress: [###############     ] 67%
 | Phase 02-model-architecture-masking P04 | 8 | 2 tasks | 1 files |
 | Phase 03-sgtm-training-loop P01 | 3 | 2 tasks | 2 files |
 | Phase 03-sgtm-training-loop P02 | 6 | 1 tasks | 1 files |
+| Phase 03-sgtm-training-loop P03 | 11 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -91,6 +92,9 @@ Recent decisions affecting current work:
 - [Phase 03-01]: ActivationMasker(model) backward-compatible; _attn_layers empty list when config is None or harmful_attn_heads is []
 - [Phase 03-sgtm-training-loop]: SafeCausalSelfAttention.forward replicates parent body not super() — y tensor is (B,T,n_head,hs) post-SDPA; head zeroing at y[:, :, head_idx, :] before reshape
 - [Phase 03-sgtm-training-loop]: torch.compile removed from safemoe/pretrain.py — Python bool flag _activation_masking_enabled traced and constant-folded by compiler
+- [Phase 03-sgtm-training-loop]: HarmfulParamRegistry must be constructed BEFORE fabric.setup(model) — Lightning wraps model and prefixes param names with _forward_module., breaking expert regex
+- [Phase 03-sgtm-training-loop]: measure_flops wrapped in try/except for MoE models — torch.where() not supported on meta device; fall back to measured_flops=0
+- [Phase 03-sgtm-training-loop]: test_pretrain_produces_checkpoint catches SystemExit(2) from save_hyperparameters CLI parse — fabric.save() runs before save_hyperparameters so checkpoint IS written
 
 ### Pending Todos
 
@@ -103,6 +107,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T05:20:15.434Z
-Stopped at: Completed 03-02-PLAN.md
+Last session: 2026-03-16T05:36:00.735Z
+Stopped at: Completed 03-03-PLAN.md
 Resume file: None

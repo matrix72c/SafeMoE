@@ -31,7 +31,7 @@ Requirements for Milestone 1 (PT Phase Validation). Maps to roadmap phases.
 
 - [x] **TRAIN-01**: Fork `litgpt/pretrain.py` -> `safemoe/pretrain.py` implementing SGTM 3-path branching per step label: D_harmful -> gradient masking (MASK-01 post-backward), D_std -> activation masking (MASK-02 in forward), D_unlabeled -> standard forward+backward
 - [x] **TRAIN-02**: `sgtm_mode` scalar passed as part of batch dict to model forward; `adjust_gradients(sgtm_mode)` called after each backward pass before optimizer step
-- [ ] **TRAIN-03**: CLI entry point `python -m safemoe pretrain` with YAML config support, consistent with LitGPT's jsonargparse conventions and config pattern from `configs/tinystories/`
+- [x] **TRAIN-03**: CLI entry point `python -m safemoe pretrain` with YAML config support, consistent with LitGPT's jsonargparse conventions and config pattern from `configs/tinystories/`
 - [ ] **TRAIN-04**: `ablate()` utility zeros theta_harmful weights in-place (`set grad/weights = 0`) and saves the ablated checkpoint as a separate file for inference evaluation
 
 ### Evaluation
@@ -82,7 +82,7 @@ Deferred to future milestones.
 | MASK-04 | Phase 2 | Complete |
 | TRAIN-01 | Phase 3 | Complete |
 | TRAIN-02 | Phase 3 | Complete |
-| TRAIN-03 | Phase 3 | Pending |
+| TRAIN-03 | Phase 3 | Complete |
 | TRAIN-04 | Phase 4 | Pending |
 | EVAL-01 | Phase 4 | Pending |
 | EVAL-02 | Phase 4 | Pending |
