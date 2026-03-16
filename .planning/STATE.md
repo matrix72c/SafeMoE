@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: milestone
 status: verifying
 stopped_at: Completed 04-05-PLAN.md — Phase 4 complete, human verification of all four requirements approved
-last_updated: "2026-03-16T16:27:48.815Z"
-last_activity: "2026-03-16 -- Verified 03-05: loss convergence confirmed on real TinyStories data"
+last_updated: "2026-03-16T16:43:00.803Z"
+last_activity: "2026-03-17 -- Verified 04-05: isolation signal confirmed — D_harmful delta 118x D_std delta, routing_harmful_frac ~2x"
 progress:
   total_phases: 4
   completed_phases: 4
