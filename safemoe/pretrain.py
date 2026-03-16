@@ -385,16 +385,19 @@ def main(
     # SGTM: REMOVED torch.compile(model) — incompatible with Python bool flag checks
     # (per RESEARCH.md anti-pattern: torch.compile traces through Python booleans, making
     # dynamic _activation_masking_enabled flag checks ineffective)
+    # SGTM: build registry BEFORE fabric.setup(model) — at this point the model
+    # has the correct raw parameter names (no DDP/FSDP "module." prefix).
+    # fabric.setup() materializes meta-tensors IN-PLACE (same Python objects),
+    # so registry param references remain valid after setup.
+    registry = HarmfulParamRegistry(model, config)
+
+    # SGTM: REMOVED torch.compile(model) — incompatible with Python bool flag checks
+    # (per RESEARCH.md anti-pattern: torch.compile traces through Python booleans, making
+    # dynamic _activation_masking_enabled flag checks ineffective)
     model = fabric.setup(model)
 
-    # SGTM: HarmfulParamRegistry must be built AFTER fabric.setup(model) so it holds
-    # real (materialized) tensors, not meta-device tensors — Lightning requires optimizer
-    # params to be real tensors at setup_optimizers() time.
-    # Use model.module (public API, strips DDP/FSDP wrappers) to get original parameter
-    # names without any "_forward_module." or "module." prefix that breaks the regex patterns.
-    registry = HarmfulParamRegistry(model.module, config)
-
-    # SGTM: dual optimizer setup (Pattern 3 from RESEARCH.md)
+    # SGTM: dual optimizer setup AFTER fabric.setup(model) — params are now materialized
+    # real tensors (fabric.setup materializes meta-tensors in-place, same Python objects).
     extra_kwargs = {"fused": fabric.device.type == "cuda"}
     optimizer_harmful = instantiate_torch_optimizer(
         optimizer, registry.parameters_by_type("theta_harmful"), **extra_kwargs
@@ -429,8 +432,10 @@ def main(
     # SGTM: Pitfall 3 fix — restore random state for split sampling reproducibility on resume
     random.seed(seed + state["iter_num"])
 
-    # SGTM: instantiate maskers using model.module (public API, strips DDP/FSDP wrappers)
-    # so modules() scan finds SafeCausalSelfAttention without any DDP "module." prefix
+    # SGTM: instantiate maskers from raw (pre-DDP) model stored in model.module;
+    # modules() scan finds SafeCausalSelfAttention without any DDP name prefix.
+    # model.module unwraps _FabricModule; on multi-GPU DDP the underlying raw GPT
+    # is model._forward_module.module — use the original `raw_model` we kept above.
     gradient_masker = GradientMasker(registry)
     activation_masker = ActivationMasker(model.module, registry=registry, config=config)
 
