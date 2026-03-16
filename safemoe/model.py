@@ -63,9 +63,11 @@ class SafeMoELayer(LLaMAMoE):
         if not self.config.n_expert_groups:
             router = self.gate(x_flat)
             probs, indices = torch.topk(router, self.config.n_expert_per_token)
+            self._last_indices = indices
             probs = probs.softmax(dim=1, dtype=torch.float).to(dtype=x_flat.dtype)
         else:
             probs, indices = self.gate(x_flat)
+            self._last_indices = indices
 
         if self.config.routed_scaling_factor != 1.0:
             probs = probs * self.config.routed_scaling_factor
