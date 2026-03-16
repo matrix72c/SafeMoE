@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Completed 04-04-PLAN.md — evaluate_with_ablation() EVAL-03 implementation
-last_updated: "2026-03-16T15:10:28.074Z"
+stopped_at: Completed 04-05-PLAN.md — Phase 4 complete, human verification of all four requirements approved
+last_updated: "2026-03-16T16:27:48.815Z"
 last_activity: "2026-03-16 -- Verified 03-05: loss convergence confirmed on real TinyStories data"
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 16
-  completed_plans: 15
+  completed_plans: 16
   percent: 100
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-13)
 
 **Core value:** Harmful knowledge must be fully containable in a designatable set of MoE parameters that can be zeroed out at inference time without degrading general model capability.
-**Current focus:** Phase 3 fully complete — ready for Phase 4 (Ablation & Evaluation)
+**Current focus:** Phase 4 fully complete — SafeMoE v1.0 milestone achieved; isolation thesis verified on real checkpoint
 
 ## Current Position
 
-Phase: 3 of 4 (SGTM Training Loop) — COMPLETE
-Status: All 5 plans complete including human verification of loss convergence
-Last activity: 2026-03-16 -- Verified 03-05: loss convergence confirmed on real TinyStories data
+Phase: 4 of 4 (Ablation & Evaluation) — COMPLETE
+Status: All 5 plans complete including human verification of isolation signal on real checkpoint
+Last activity: 2026-03-17 -- Verified 04-05: isolation signal confirmed — D_harmful delta 118x D_std delta, routing_harmful_frac ~2x
 
 Progress: [██████████] 100%
 
@@ -63,6 +63,7 @@ Progress: [██████████] 100%
 | Phase 04-ablation-evaluation P02 | 15 | 2 tasks | 3 files |
 | Phase 04-ablation-evaluation P01 | 8 | 3 tasks | 3 files |
 | Phase 04-ablation-evaluation P04 | 20 | 1 tasks | 2 files |
+| Phase 04-ablation-evaluation P05 | 30 | 2 tasks | 0 files |
 
 ## Accumulated Context
 
@@ -111,6 +112,8 @@ Recent decisions affecting current work:
 - [Phase 04-01]: evaluate_with_ablation() takes eval_args: EvalArgs and calls fabric.log_dict() exactly once with combined D_std and D_harmful PPL metrics
 - [Phase 04-04]: evaluate_with_ablation() uses try/finally to guarantee weight restore even on exception; model.train() in finally owns eval-mode cleanup
 - [Phase 04-04]: val_loaders passed as Optional dict to fit() — None skips ablation eval, preserving backward compatibility
+- [Phase 04-ablation-evaluation]: EVAL-03 TensorBoard curves deferred — checkpoint pre-dates Phase 4 implementation; unit tests and wiring sufficient for requirement verification
+- [Phase 04-ablation-evaluation]: Human verification confirmed isolation signal: D_harmful ppl delta (1645) is 118x D_std delta (13.87); routing_harmful_frac_D_harmful (7.35%) approx 2x D_std fraction (3.72%)
 
 ### Pending Todos
 
@@ -123,6 +126,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T15:10:28.068Z
-Stopped at: Completed 04-04-PLAN.md — evaluate_with_ablation() EVAL-03 implementation
+Last session: 2026-03-16T16:27:48.808Z
+Stopped at: Completed 04-05-PLAN.md — Phase 4 complete, human verification of all four requirements approved
 Resume file: None
