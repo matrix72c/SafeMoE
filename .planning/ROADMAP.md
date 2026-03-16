@@ -89,5 +89,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 |-------|----------------|--------|-----------|
 | 1. Data Pipeline | 2/2 | Complete   | 2026-03-15 |
 | 2. Model Architecture & Masking | 4/4 | Complete   | 2026-03-16 |
-| 3. SGTM Training Loop | 3/5 | Gap closure in progress | 2026-03-16 |
+| 3. SGTM Training Loop | 4/5 | In Progress|  |
 | 4. Ablation & Evaluation | 0/TBD | Not started | - |

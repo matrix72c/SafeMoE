@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 03-03-PLAN.md
-last_updated: "2026-03-16T05:36:00.741Z"
-last_activity: "2026-03-16 -- Executed 02-03: HarmfulParamRegistry in safemoe/masking.py with GradientMasker/ActivationMasker stubs"
+status: completed
+stopped_at: Completed 03-04-PLAN.md
+last_updated: "2026-03-16T07:05:43.460Z"
+last_activity: "2026-03-16 -- Executed 03-03: CLI entry point + checkpoint test + pretrain bug fixes"
 progress:
   total_phases: 4
-  completed_phases: 3
-  total_plans: 9
-  completed_plans: 9
+  completed_phases: 2
+  total_plans: 11
+  completed_plans: 10
   percent: 100
 ---
 
@@ -59,6 +59,7 @@ Progress: [██████████] 100%
 | Phase 03-sgtm-training-loop P01 | 3 | 2 tasks | 2 files |
 | Phase 03-sgtm-training-loop P02 | 6 | 1 tasks | 1 files |
 | Phase 03-sgtm-training-loop P03 | 11 | 2 tasks | 4 files |
+| Phase 03-sgtm-training-loop P04 | 25 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -95,6 +96,8 @@ Recent decisions affecting current work:
 - [Phase 03-sgtm-training-loop]: HarmfulParamRegistry must be constructed BEFORE fabric.setup(model) — Lightning wraps model and prefixes param names with _forward_module., breaking expert regex
 - [Phase 03-sgtm-training-loop]: measure_flops wrapped in try/except for MoE models — torch.where() not supported on meta device; fall back to measured_flops=0
 - [Phase 03-sgtm-training-loop]: test_pretrain_produces_checkpoint catches SystemExit(2) from save_hyperparameters CLI parse — fabric.save() runs before save_hyperparameters so checkpoint IS written
+- [Phase 03-sgtm-training-loop]: SafeCausalSelfAttention.forward() must clone y before in-place head-zeroing — SDPA output is part of autograd graph
+- [Phase 03-sgtm-training-loop]: [03-04]: block_size=128 in test configs + max_tokens=accum_iters*micro_batch_size*block_size for exactly 1 optimizer step in behavioral tests
 
 ### Pending Todos
 
@@ -107,6 +110,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T05:36:00.735Z
-Stopped at: Completed 03-03-PLAN.md
+Last session: 2026-03-16T07:05:43.454Z
+Stopped at: Completed 03-04-PLAN.md
 Resume file: None
