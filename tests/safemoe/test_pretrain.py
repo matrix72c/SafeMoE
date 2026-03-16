@@ -643,3 +643,144 @@ def test_pretrain_produces_checkpoint(tmp_path):
         f"Expected final checkpoint at {final_checkpoint} but it was not found. "
         f"Contents of out_dir: {list(out_dir.rglob('*')) if out_dir.exists() else 'out_dir missing'}"
     )
+
+
+# ===========================================================================
+# EVAL-03: evaluate_with_ablation() tests
+# ===========================================================================
+
+
+def _build_val_loaders(block_size: int = 128, vocab_size: int = 1024) -> dict:
+    """Build {"D_std": DataLoader, "D_harmful": DataLoader} for ablation tests.
+
+    Deliberately excludes D_unlabeled to match the locked metric contract.
+    """
+    ds_std = _SynthDataset(5, block_size, vocab_size)
+    ds_harmful = _SynthDataset(5, block_size, vocab_size)
+    return {
+        "D_std": DataLoader(ds_std, batch_size=1, drop_last=False),
+        "D_harmful": DataLoader(ds_harmful, batch_size=1, drop_last=False),
+    }
+
+
+def test_evaluate_with_ablation_restores_weights():
+    """EVAL-03: After evaluate_with_ablation() returns, all theta_harmful param data
+    tensors are identical to their pre-call values.
+
+    Uses a model with harmful_expert_indices=[0,1]. Captures original theta_harmful
+    tensor values, calls evaluate_with_ablation(), then asserts every harmful param
+    data tensor is bitwise-identical to its pre-call snapshot. Also asserts model
+    is in train mode after the call.
+    """
+    from safemoe.pretrain import evaluate_with_ablation
+
+    fabric = L.Fabric(devices=1, accelerator="cpu", strategy="auto")
+    fabric.launch()
+
+    torch.manual_seed(7)
+    config = SafeMoEConfig(**TINY_CONFIG)
+    model = litgpt.GPT(config)
+    model.train()
+    model = fabric.setup(model)
+
+    registry = HarmfulParamRegistry(model.module, config)
+
+    # Snapshot theta_harmful param data BEFORE ablation
+    harmful_params = registry.parameters_by_type("theta_harmful")
+    assert len(harmful_params) > 0, "registry must contain theta_harmful params"
+    saved_snapshots = [p.data.clone() for p in harmful_params]
+
+    val_loaders = _build_val_loaders(
+        block_size=config.block_size, vocab_size=config.padded_vocab_size
+    )
+
+    eval_args = EvalArgs(interval=1000, max_iters=2)
+    evaluate_with_ablation(
+        fabric=fabric,
+        model=model,
+        registry=registry,
+        val_loaders=val_loaders,
+        iter_num=10,
+        eval_args=eval_args,
+    )
+
+    # Verify every theta_harmful param is byte-for-byte identical to pre-call snapshot
+    for i, (p, snapshot) in enumerate(zip(harmful_params, saved_snapshots)):
+        assert torch.equal(p.data, snapshot), (
+            f"theta_harmful param {i} was not restored after evaluate_with_ablation(). "
+            f"Max absolute diff: {(p.data - snapshot).abs().max().item():.6e}"
+        )
+
+    # Verify model is in train mode after the call
+    assert model.training, (
+        "Model must be in train mode after evaluate_with_ablation() returns; "
+        "found model.training=False (eval mode leaked from validate())"
+    )
+
+
+def test_evaluate_with_ablation_logs_metrics():
+    """EVAL-03: evaluate_with_ablation() logs exactly ablated_val_ppl_D_std and
+    ablated_val_ppl_D_harmful via fabric.log_dict() — no D_unlabeled metric.
+
+    Uses a mock fabric.log_dict() to capture what metrics are logged.
+    Asserts:
+    - exactly two keys are logged
+    - keys are 'ablated_val_ppl_D_std' and 'ablated_val_ppl_D_harmful'
+    - 'ablated_val_ppl_D_unlabeled' is NOT present
+    - values are finite positive floats (perplexity > 0)
+    - step argument equals iter_num passed in
+    """
+    from safemoe.pretrain import evaluate_with_ablation
+
+    fabric = L.Fabric(devices=1, accelerator="cpu", strategy="auto")
+    fabric.launch()
+
+    torch.manual_seed(9)
+    config = SafeMoEConfig(**TINY_CONFIG)
+    model = litgpt.GPT(config)
+    model.train()
+    model = fabric.setup(model)
+
+    registry = HarmfulParamRegistry(model.module, config)
+    val_loaders = _build_val_loaders(
+        block_size=config.block_size, vocab_size=config.padded_vocab_size
+    )
+
+    logged_calls: list[dict] = []
+
+    def _capture_log_dict(metrics: dict, step: int = None) -> None:
+        logged_calls.append({"metrics": metrics, "step": step})
+
+    with patch.object(fabric, "log_dict", side_effect=_capture_log_dict):
+        evaluate_with_ablation(
+            fabric=fabric,
+            model=model,
+            registry=registry,
+            val_loaders=val_loaders,
+            iter_num=42,
+            eval_args=EvalArgs(interval=1000, max_iters=2),
+        )
+
+    assert len(logged_calls) == 1, (
+        f"evaluate_with_ablation() must call fabric.log_dict() exactly once; "
+        f"got {len(logged_calls)} calls"
+    )
+
+    metrics = logged_calls[0]["metrics"]
+    step = logged_calls[0]["step"]
+
+    assert step == 42, (
+        f"fabric.log_dict() step must equal iter_num=42; got step={step}"
+    )
+
+    expected_keys = {"ablated_val_ppl_D_std", "ablated_val_ppl_D_harmful"}
+    assert set(metrics.keys()) == expected_keys, (
+        f"Logged metrics keys must be exactly {expected_keys}; "
+        f"got {set(metrics.keys())}. "
+        f"Note: ablated_val_ppl_D_unlabeled must NOT be logged (locked decision)."
+    )
+
+    for key, val in metrics.items():
+        assert isinstance(val, float), f"Metric {key!r} must be a float; got {type(val)}"
+        assert val > 0, f"Perplexity {key!r} must be positive; got {val}"
+        assert val != float("inf"), f"Perplexity {key!r} must be finite; got {val}"
