@@ -20,4 +20,10 @@ n_expert_per_token: 2
 # SafeMoEConfig-specific fields:
 harmful_expert_indices: [0, 1]
 num_harmful_experts: 2
-harmful_attn_heads: []
+harmful_attn_heads: [0, 1]
+# SGTM training loop fields (Phase 3):
+upsample_std: 1
+upsample_harmful: 1
+upsample_unlabeled: 1
+micro_batch_size: 4
+gradient_accumulation_iters: 4
