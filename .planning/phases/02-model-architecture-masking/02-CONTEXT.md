@@ -18,7 +18,7 @@ Build the SafeMoE model internals: SafeMoEConfig, SafeMoELayer (subclassing LLaM
 - Adds three fields with defaults: `harmful_expert_indices: list[int] = field(default_factory=list)`, `harmful_attn_heads: list[int] = field(default_factory=list)`, `num_harmful_experts: int = 0`
 - All defaults produce a config that behaves identically to a standard `Config` (no harmful designation)
 - Phase 2 also includes a `safemoe/configs/safemoe-tinystories.yaml` experiment config for a small TinyStories MoE model (small n_layer, 4–8 experts, 2 harmful experts designated)
-
+/gsd
 ### Attention head designation
 - `harmful_attn_heads: list[int]` is a **global** list of head indices applied uniformly across **every** attention layer in the model
 - The QKV projection rows for each designated head are θ_harmful; the output projection (`attn.proj`) stays θ_std
@@ -37,10 +37,10 @@ Build the SafeMoE model internals: SafeMoEConfig, SafeMoELayer (subclassing LLaM
 - No hooks — explicit, transparent, matches MASK-01 spec ("post-backward zeroing, not detach-in-forward")
 
 ### ActivationMasker
-- A forward hook is registered on each `SafeMoELayer` instance at `ActivationMasker` construction
-- Hook is toggled via `masker.enable()` / `masker.disable()` — when enabled, the hook fires and zeroes harmful expert output contributions; when disabled, hook is a no-op
+- `SafeMoELayer` carries a `_activation_masking_enabled: bool` flag (default `False`); `ActivationMasker` holds references to all `SafeMoELayer` instances collected at construction time via `model.modules()`
+- `masker.enable()` sets `_activation_masking_enabled = True` on every `SafeMoELayer`; `masker.disable()` restores it to `False`
 - Training loop calls `activation_masker.enable()` before each D_std forward pass, `activation_masker.disable()` after
-- Hook mechanism: zeros the output contributions of `harmful_expert_indices` experts (their accumulated `y[token_idx]` contribution is zeroed), effectively making them invisible during D_std steps
+- Flag-based approach (not a `register_forward_hook`): `SafeMoELayer.forward()` checks `self._activation_masking_enabled` and skips accumulation for harmful expert indices — this is necessary because a post-forward hook receives the already-aggregated `y` tensor and cannot retroactively zero individual expert contributions (RESEARCH.md Pitfall 4)
 
 ### Dual optimizer param groups
 - `MASK-03`: two separate `AdamW` instances (or param groups) — one for θ_harmful, one for θ_std
@@ -59,7 +59,7 @@ Build the SafeMoE model internals: SafeMoEConfig, SafeMoELayer (subclassing LLaM
 ## Existing Code Insights
 
 ### Reusable Assets
-- `litgpt/model.py:776 LLaMAMoE`: SafeMoELayer subclasses this. Has `gate`, `experts: nn.ModuleList`, and a `for mask, expert in zip(masks, self.experts): y[token_idx] += ...` dispatch loop — ActivationMasker hook fires after this forward, zeroing harmful expert contributions.
+- `litgpt/model.py:776 LLaMAMoE`: SafeMoELayer subclasses this. Has `gate`, `experts: nn.ModuleList`, and a `for mask, expert in zip(masks, self.experts): y[token_idx] += ...` dispatch loop — SafeMoELayer.forward() checks `_activation_masking_enabled` to skip harmful expert accumulation.
 - `litgpt/config.py Config`: Base class for SafeMoEConfig. Already has `n_expert`, `n_expert_per_token`, `moe_intermediate_size`. SafeMoEConfig inherits all of these.
 - `litgpt/lora.py lora_filter()` + `named_parameters()` scan: Established pattern for per-parameter type filtering — HarmfulParamRegistry follows the same approach.
 - `litgpt/model.py CausalSelfAttention`: Fused QKV in `attn.attn` linear (weight shape: `(n_head + 2*n_query_groups) * head_size, n_embd`). Head i's Q rows = `[i*head_size : (i+1)*head_size]`; head i's K rows start after all Q rows.
