@@ -43,7 +43,13 @@ Plans:
   3. After a backward pass on a test batch with GradientMasker active, theta_std parameters have grad=None and theta_harmful parameters have non-zero gradients
   4. During a forward pass with ActivationMasker active, harmful expert outputs are exactly zero while standard expert outputs are non-zero
   5. Unit tests for all four masking invariants (MASK-04) pass: grad isolation, activation zeroing, and dual optimizer param groups with set_to_none=True do not corrupt Adam state
-**Plans**: TBD
+**Plans**: 4 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — TDD RED: test stubs for all 4 test files + safemoe-tinystories.yaml experiment config [MOE-01, MOE-02, MOE-03, MOE-04, MASK-01, MASK-02, MASK-03, MASK-04]
+- [ ] 02-02-PLAN.md — TDD GREEN: SafeMoEConfig (config.py) + SafeMoELayer (model.py) [MOE-01, MOE-03, MOE-04]
+- [ ] 02-03-PLAN.md — TDD GREEN: HarmfulParamRegistry in masking.py with GradientMasker/ActivationMasker stubs [MOE-02, MASK-03]
+- [ ] 02-04-PLAN.md — TDD GREEN: GradientMasker + ActivationMasker complete implementation, full suite GREEN [MASK-01, MASK-02, MASK-04]
 
 ### Phase 3: SGTM Training Loop
 **Goal**: An end-to-end SGTM pretraining script that consumes the three-split data, applies the correct masking path per split label, and produces a trained SafeMoE checkpoint
@@ -75,6 +81,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Data Pipeline | 2/2 | Complete   | 2026-03-15 |
-| 2. Model Architecture & Masking | 0/TBD | Not started | - |
+| 2. Model Architecture & Masking | 0/4 | Not started | - |
 | 3. SGTM Training Loop | 0/TBD | Not started | - |
 | 4. Ablation & Evaluation | 0/TBD | Not started | - |
