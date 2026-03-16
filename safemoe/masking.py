@@ -1,4 +1,4 @@
-"""safemoe/masking.py — HarmfulParamRegistry and masker stubs.
+"""safemoe/masking.py — HarmfulParamRegistry and masker implementations.
 
 HarmfulParamRegistry scans all model parameters at construction time and
 classifies each one as either theta_harmful or theta_std:
@@ -13,8 +13,14 @@ QKV row-slice metadata is stored separately in _qkv_harmful_metadata for
 Phase 3 per-head gradient masking, but the qkv.weight Parameter itself is
 always in theta_std (not in theta_harmful).
 
-GradientMasker and ActivationMasker are stubs — their .mask() / .enable() /
-.disable() raise NotImplementedError until Plan 04 implements them.
+GradientMasker: sets theta_std gradients to None after D_harmful backward
+(post-backward zeroing, not detach-in-forward; .grad=None prevents Adam state
+accumulation per MASK-01 spec).
+
+ActivationMasker: flag-based approach — enable()/disable() set
+_activation_masking_enabled on every SafeMoELayer in the model. SafeMoELayer
+forward() checks the flag and skips harmful expert accumulation (MASK-02,
+MASK-04).
 """
 
 from __future__ import annotations
@@ -146,40 +152,78 @@ class HarmfulParamRegistry:
 
 
 # ---------------------------------------------------------------------------
-# Stubs — implemented in Plan 04
+# Maskers — implemented in Plan 04
 # ---------------------------------------------------------------------------
 
 
 class GradientMasker:
     """Zeros theta_std gradients after a D_harmful backward pass.
 
-    Implementation in Plan 04.  Stub is present so test_masking.py imports
-    succeed without ImportError before Plan 04 runs.
+    Call ``mask()`` immediately after ``loss.backward()`` on a D_harmful batch.
+    Sets ``p.grad = None`` (not ``p.grad.zero_()``) for every theta_std
+    parameter so the downstream AdamW optimizer never accumulates momentum
+    state for those parameters on D_harmful steps (MASK-01).
     """
 
     def __init__(self, registry: HarmfulParamRegistry) -> None:
         self._registry = registry
 
     def mask(self) -> None:
-        """Set all theta_std parameter gradients to None."""
-        raise NotImplementedError("GradientMasker.mask() implemented in Plan 04")
+        """Call after loss.backward() on a D_harmful batch.
+
+        Sets theta_std parameter gradients to None so only theta_harmful
+        parameters receive gradient updates. Post-backward zeroing (not
+        detach-in-forward) per MASK-01 spec. Setting .grad = None (not
+        .grad.zero_()) prevents Adam momentum accumulation for theta_std.
+        """
+        for p in self._registry.parameters_by_type("theta_std"):
+            p.grad = None
 
 
 class ActivationMasker:
     """Toggles activation masking on every SafeMoELayer in the model.
 
-    Implementation in Plan 04.  Stub is present so test_masking.py imports
-    succeed without ImportError before Plan 04 runs.
+    Flag-based design (MASK-02, Pitfall 4 resolution): enable()/disable() set
+    ``_activation_masking_enabled`` on each SafeMoELayer instance. SafeMoELayer
+    checks this flag in its forward() and skips harmful expert accumulation when
+    True. This avoids the register_forward_hook approach, which cannot
+    un-aggregate already-summed expert outputs.
+
+    Parameters
+    ----------
+    model:
+        The nn.Module (typically a litgpt.GPT) containing SafeMoELayer instances.
+    registry:
+        Optional HarmfulParamRegistry (not used by enable/disable — retained for
+        API symmetry with GradientMasker and future Phase 3 extensions).
     """
 
-    def __init__(self, model: nn.Module) -> None:
-        self._model = model
-        self._enabled = False
+    def __init__(
+        self, model: nn.Module, registry: "HarmfulParamRegistry | None" = None
+    ) -> None:
+        self._registry = registry
+        from safemoe.model import SafeMoELayer
+
+        self._layers: list[SafeMoELayer] = [
+            m for m in model.modules() if isinstance(m, SafeMoELayer)
+        ]
 
     def enable(self) -> None:
-        """Set _activation_masking_enabled = True on every SafeMoELayer."""
-        raise NotImplementedError("ActivationMasker.enable() implemented in Plan 04")
+        """Enable activation masking on all SafeMoELayer instances.
+
+        Call before the D_std forward pass. Sets
+        ``layer._activation_masking_enabled = True`` on every SafeMoELayer,
+        causing those layers to skip harmful expert contributions in forward().
+        """
+        for layer in self._layers:
+            layer._activation_masking_enabled = True
 
     def disable(self) -> None:
-        """Set _activation_masking_enabled = False on every SafeMoELayer."""
-        raise NotImplementedError("ActivationMasker.disable() implemented in Plan 04")
+        """Disable activation masking on all SafeMoELayer instances.
+
+        Call after the D_std forward pass. Restores
+        ``layer._activation_masking_enabled = False`` on every SafeMoELayer
+        so subsequent forward passes use normal expert dispatch.
+        """
+        for layer in self._layers:
+            layer._activation_masking_enabled = False
