@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 3 context gathered
-last_updated: "2026-03-16T04:37:04.085Z"
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-03-16T05:13:15.263Z"
 last_activity: "2026-03-16 -- Executed 02-03: HarmfulParamRegistry in safemoe/masking.py with GradientMasker/ActivationMasker stubs"
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 6
-  completed_plans: 6
+  total_plans: 9
+  completed_plans: 7
   percent: 67
 ---
 
@@ -56,6 +56,7 @@ Progress: [###############     ] 67%
 | Phase 02-model-architecture-masking P03 | 3 | 1 task | 1 file |
 | Phase 02-model-architecture-masking P04 | 525668 | 2 tasks | 1 files |
 | Phase 02-model-architecture-masking P04 | 8 | 2 tasks | 1 files |
+| Phase 03-sgtm-training-loop P01 | 3 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -84,6 +85,9 @@ Recent decisions affecting current work:
 - [Phase 02-03]: GradientMasker(registry), ActivationMasker(model) constructor signatures match RED test stubs exactly
 - [Phase 02-model-architecture-masking]: [Phase 02-04]: ActivationMasker.__init__ takes model + optional registry=None — test stubs call ActivationMasker(model) but plan shows (model, registry); registry optional for symmetry and Phase 3 extension
 - [Phase 02-model-architecture-masking]: [Phase 02-04]: p.grad = None (not zero_()) in GradientMasker.mask() — None prevents AdamW exp_avg/exp_avg_sq accumulation for theta_std entirely; zero_() would still trigger Adam state creation on next step()
+- [Phase 03-01]: test_attn_head_activation_masking verifies flag-state only — actual head output zeroing assertion deferred to Plan 03-03 Task 2
+- [Phase 03-01]: _wrap_attn_forward installs a pass-through stub in 03-01; Plan 03-02 replaces with real head-output zeroing via SafeCausalSelfAttention
+- [Phase 03-01]: ActivationMasker(model) backward-compatible; _attn_layers empty list when config is None or harmful_attn_heads is []
 
 ### Pending Todos
 
@@ -96,6 +100,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T04:37:04.079Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-sgtm-training-loop/03-CONTEXT.md
+Last session: 2026-03-16T05:13:15.257Z
+Stopped at: Completed 03-01-PLAN.md
+Resume file: None
