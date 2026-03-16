@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Completed 04-ablation-evaluation/04-03-PLAN.md
-last_updated: "2026-03-16T15:04:52.910Z"
+stopped_at: Completed 04-ablation-evaluation-04-02-PLAN.md
+last_updated: "2026-03-16T15:04:57.793Z"
 last_activity: "2026-03-16 -- Verified 03-05: loss convergence confirmed on real TinyStories data"
 progress:
   total_phases: 4
@@ -116,6 +116,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T15:04:40.721Z
-Stopped at: Completed 04-ablation-evaluation/04-03-PLAN.md
+Last session: 2026-03-16T15:04:57.780Z
+Stopped at: Completed 04-ablation-evaluation-04-02-PLAN.md
 Resume file: None
