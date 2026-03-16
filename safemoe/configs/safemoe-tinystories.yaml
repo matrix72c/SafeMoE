@@ -39,6 +39,17 @@ train:
   log_interval: 10
   max_tokens: 3000000000000
 
+# Data module — MultiDataLoader instantiated via jsonargparse class_path syntax.
+# Adjust cache_dir, x, y to match your data preparation settings.
+data:
+  class_path: safemoe.data.datamodule.MultiDataLoader
+  init_args:
+    cache_dir: data/.cache
+    x: 0
+    y: 25
+    seed: 42
+    num_workers: 4
+
 # SGTM training loop fields (Phase 3) — top-level setup() params:
 upsample_std: 1
 upsample_harmful: 1
