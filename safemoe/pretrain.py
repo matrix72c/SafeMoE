@@ -385,19 +385,18 @@ def main(
     # SGTM: REMOVED torch.compile(model) — incompatible with Python bool flag checks
     # (per RESEARCH.md anti-pattern: torch.compile traces through Python booleans, making
     # dynamic _activation_masking_enabled flag checks ineffective)
-    # SGTM: build registry BEFORE fabric.setup(model) — at this point the model
-    # has the correct raw parameter names (no DDP/FSDP "module." prefix).
-    # fabric.setup() materializes meta-tensors IN-PLACE (same Python objects),
-    # so registry param references remain valid after setup.
-    registry = HarmfulParamRegistry(model, config)
-
-    # SGTM: REMOVED torch.compile(model) — incompatible with Python bool flag checks
-    # (per RESEARCH.md anti-pattern: torch.compile traces through Python booleans, making
-    # dynamic _activation_masking_enabled flag checks ineffective)
     model = fabric.setup(model)
 
-    # SGTM: dual optimizer setup AFTER fabric.setup(model) — params are now materialized
-    # real tensors (fabric.setup materializes meta-tensors in-place, same Python objects).
+    # SGTM: build registry AFTER fabric.setup() so params are materialized real tensors.
+    # fabric.setup() wraps the model in _FabricModule, and on multi-GPU DDP also wraps
+    # in DistributedDataParallel — both add name prefixes that break the expert regex.
+    # Unwrap both layers to reach the raw GPT with original parameter names.
+    _raw = model._forward_module  # _FabricModule -> DDP (multi-GPU) or GPT (single)
+    if hasattr(_raw, "module"):   # DDP/FSDP -> unwrap one more level to raw GPT
+        _raw = _raw.module
+    registry = HarmfulParamRegistry(_raw, config)
+
+    # SGTM: dual optimizer setup AFTER fabric.setup(model) — params are now materialized.
     extra_kwargs = {"fused": fabric.device.type == "cuda"}
     optimizer_harmful = instantiate_torch_optimizer(
         optimizer, registry.parameters_by_type("theta_harmful"), **extra_kwargs
