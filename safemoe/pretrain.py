@@ -382,15 +382,17 @@ def main(
             safe_attn.__dict__.update(module.__dict__)
             setattr(parent, attr, safe_attn)
 
-    # SGTM: HarmfulParamRegistry must be built BEFORE fabric.setup(model) because
-    # fabric wraps the model and prefixes all parameter names with "_forward_module.",
-    # which breaks the regex patterns used in HarmfulParamRegistry.
-    registry = HarmfulParamRegistry(model, config)
-
     # SGTM: REMOVED torch.compile(model) — incompatible with Python bool flag checks
     # (per RESEARCH.md anti-pattern: torch.compile traces through Python booleans, making
     # dynamic _activation_masking_enabled flag checks ineffective)
     model = fabric.setup(model)
+
+    # SGTM: HarmfulParamRegistry must be built AFTER fabric.setup(model) so it holds
+    # real (materialized) tensors, not meta-device tensors — Lightning requires optimizer
+    # params to be real tensors at setup_optimizers() time.
+    # Use model._forward_module (the unwrapped GPT) to avoid the "_forward_module."
+    # name prefix that fabric adds, which would break the expert/qkv regex patterns.
+    registry = HarmfulParamRegistry(model._forward_module, config)
 
     # SGTM: dual optimizer setup (Pattern 3 from RESEARCH.md)
     extra_kwargs = {"fused": fabric.device.type == "cuda"}
@@ -427,9 +429,10 @@ def main(
     # SGTM: Pitfall 3 fix — restore random state for split sampling reproducibility on resume
     random.seed(seed + state["iter_num"])
 
-    # SGTM: instantiate maskers after SafeCausalSelfAttention replacement
+    # SGTM: instantiate maskers using unwrapped model so modules() scan finds
+    # SafeCausalSelfAttention instances without the _forward_module. wrapper prefix
     gradient_masker = GradientMasker(registry)
-    activation_masker = ActivationMasker(model, registry=registry, config=config)
+    activation_masker = ActivationMasker(model._forward_module, registry=registry, config=config)
 
     train_time = time.perf_counter()
 
