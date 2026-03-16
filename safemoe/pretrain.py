@@ -160,7 +160,10 @@ class SafeCausalSelfAttention(CausalSelfAttention):
         y = self.scaled_dot_product_attention(q, k, v, mask)
 
         # SGTM: zero harmful-head outputs before reshape+proj (TRAIN-02 locked decision)
+        # Clone y before in-place zeroing to avoid corrupting the autograd graph version
+        # (in-place ops on sdpa output cause RuntimeError during backward).
         if self._activation_masking_enabled:
+            y = y.clone()
             for head_idx in self._harmful_heads:
                 y[:, :, head_idx, :] = 0
 
