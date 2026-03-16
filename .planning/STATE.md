@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Phase 4 context gathered
-last_updated: "2026-03-16T13:17:40.615Z"
+stopped_at: Completed 04-ablation-evaluation/04-03-PLAN.md
+last_updated: "2026-03-16T15:04:52.910Z"
 last_activity: "2026-03-16 -- Verified 03-05: loss convergence confirmed on real TinyStories data"
 progress:
   total_phases: 4
   completed_phases: 3
-  total_plans: 11
-  completed_plans: 11
+  total_plans: 16
+  completed_plans: 13
   percent: 100
 ---
 
@@ -59,6 +59,8 @@ Progress: [██████████] 100%
 | Phase 03-sgtm-training-loop P02 | 6 | 1 tasks | 1 files |
 | Phase 03-sgtm-training-loop P03 | 11 | 2 tasks | 4 files |
 | Phase 03-sgtm-training-loop P04 | 25 | 2 tasks | 3 files |
+| Phase 04-ablation-evaluation P03 | 14 | 3 tasks | 4 files |
+| Phase 04-ablation-evaluation P02 | 15 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -97,6 +99,11 @@ Recent decisions affecting current work:
 - [Phase 03-sgtm-training-loop]: test_pretrain_produces_checkpoint catches SystemExit(2) from save_hyperparameters CLI parse — fabric.save() runs before save_hyperparameters so checkpoint IS written
 - [Phase 03-sgtm-training-loop]: SafeCausalSelfAttention.forward() must clone y before in-place head-zeroing — SDPA output is part of autograd graph
 - [Phase 03-sgtm-training-loop]: [03-04]: block_size=128 in test configs + max_tokens=accum_iters*micro_batch_size*block_size for exactly 1 optimizer step in behavioral tests
+- [Phase 04-ablation-evaluation]: SafeMoELayer._last_indices written in both topk branches — negligible overhead, attribute unused unless hook reads it
+- [Phase 04-ablation-evaluation]: evaluate_perplexity re-fetches val loaders for ablated model to handle exhausted DataLoader iterators
+- [Phase 04-ablation-evaluation]: data_mock duck-typing in evaluate.py: any object with val_dataloaders() method works
+- [Phase 04-ablation-evaluation]: Use torch.load() directly (not fabric.load()) for ablation — standalone checkpoint manipulation, no DDP prefix stripping needed
+- [Phase 04-ablation-evaluation]: Build id_to_name map before zeroing to capture parameter names without iterating model twice during in-place ablation
 
 ### Pending Todos
 
@@ -109,6 +116,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T13:17:40.609Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-ablation-evaluation/04-CONTEXT.md
+Last session: 2026-03-16T15:04:40.721Z
+Stopped at: Completed 04-ablation-evaluation/04-03-PLAN.md
+Resume file: None
