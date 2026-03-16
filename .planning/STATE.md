@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-02-PLAN.md
-last_updated: "2026-03-16T02:07:12.756Z"
-last_activity: "2026-03-15 -- Executed 01-01: data preparation pipeline (compute_splits + prepare + litdata)"
+stopped_at: Completed 02-03-PLAN.md
+last_updated: "2026-03-16T02:08:30Z"
+last_activity: "2026-03-16 -- Executed 02-03: HarmfulParamRegistry in safemoe/masking.py with GradientMasker/ActivationMasker stubs"
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 6
-  completed_plans: 4
-  percent: 50
+  completed_plans: 5
+  percent: 67
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-13)
 
 **Core value:** Harmful knowledge must be fully containable in a designatable set of MoE parameters that can be zeroed out at inference time without degrading general model capability.
-**Current focus:** Phase 1 - Data Pipeline
+**Current focus:** Phase 2 - Model Architecture & Masking
 
 ## Current Position
 
-Phase: 1 of 4 (Data Pipeline)
-Plan: 1 of 2 in current phase
-Status: In progress — plan 01-01 complete, 01-02 pending
-Last activity: 2026-03-15 -- Executed 01-01: data preparation pipeline (compute_splits + prepare + litdata)
+Phase: 2 of 4 (Model Architecture & Masking)
+Plan: 3 of 4 in current phase
+Status: In progress — plans 02-01, 02-02, 02-03 complete, 02-04 pending
+Last activity: 2026-03-16 -- Executed 02-03: HarmfulParamRegistry in safemoe/masking.py with GradientMasker/ActivationMasker stubs
 
-Progress: [##########          ] 50%
+Progress: [###############     ] 67%
 
 ## Performance Metrics
 
@@ -53,6 +53,7 @@ Progress: [##########          ] 50%
 | Phase 01-data-pipeline P02 | 6 | 2 tasks | 2 files |
 | Phase 02-model-architecture-masking P01 | 3 | 4 tasks | 5 files |
 | Phase 02-model-architecture-masking P02 | 2 | 2 tasks | 2 files |
+| Phase 02-model-architecture-masking P03 | 3 | 1 task | 1 file |
 
 ## Accumulated Context
 
@@ -77,6 +78,8 @@ Recent decisions affecting current work:
 - [Phase 02-01]: ActivationMasker test uses _activation_masking_enabled flag checks, not per-expert output tensors
 - [Phase 02-model-architecture-masking]: [02-02]: init_strategy='random'|'copy' is SafeMoELayer constructor arg — test stubs call SafeMoELayer(config, init_strategy='copy'), not a config field
 - [Phase 02-model-architecture-masking]: [02-02]: Lazy import of SafeMoELayer inside SafeMoEConfig.mlp_class property body breaks circular import
+- [Phase 02-03]: qkv.weight in theta_std (full parameter) + _qkv_harmful_metadata (row slices) — duality intentional for Phase 2/3 masker scope split
+- [Phase 02-03]: GradientMasker(registry), ActivationMasker(model) constructor signatures match RED test stubs exactly
 
 ### Pending Todos
 
@@ -89,6 +92,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-16T02:07:12.752Z
-Stopped at: Completed 02-02-PLAN.md
+Last session: 2026-03-16T02:08:30Z
+Stopped at: Completed 02-03-PLAN.md
 Resume file: None

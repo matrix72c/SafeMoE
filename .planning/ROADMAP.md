@@ -46,9 +46,9 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
-- [ ] 02-01-PLAN.md — TDD RED: test stubs for all 4 test files + safemoe-tinystories.yaml experiment config [MOE-01, MOE-02, MOE-03, MOE-04, MASK-01, MASK-02, MASK-03, MASK-04]
-- [ ] 02-02-PLAN.md — TDD GREEN: SafeMoEConfig (config.py) + SafeMoELayer (model.py) [MOE-01, MOE-03, MOE-04]
-- [ ] 02-03-PLAN.md — TDD GREEN: HarmfulParamRegistry in masking.py with GradientMasker/ActivationMasker stubs [MOE-02, MASK-03]
+- [x] 02-01-PLAN.md — TDD RED: test stubs for all 4 test files + safemoe-tinystories.yaml experiment config [MOE-01, MOE-02, MOE-03, MOE-04, MASK-01, MASK-02, MASK-03, MASK-04]
+- [x] 02-02-PLAN.md — TDD GREEN: SafeMoEConfig (config.py) + SafeMoELayer (model.py) [MOE-01, MOE-03, MOE-04]
+- [x] 02-03-PLAN.md — TDD GREEN: HarmfulParamRegistry in masking.py with GradientMasker/ActivationMasker stubs [MOE-02, MASK-03]
 - [ ] 02-04-PLAN.md — TDD GREEN: GradientMasker + ActivationMasker complete implementation, full suite GREEN [MASK-01, MASK-02, MASK-04]
 
 ### Phase 3: SGTM Training Loop
@@ -81,6 +81,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Data Pipeline | 2/2 | Complete   | 2026-03-15 |
-| 2. Model Architecture & Masking | 2/4 | In Progress|  |
+| 2. Model Architecture & Masking | 3/4 | In Progress|  |
 | 3. SGTM Training Loop | 0/TBD | Not started | - |
 | 4. Ablation & Evaluation | 0/TBD | Not started | - |
