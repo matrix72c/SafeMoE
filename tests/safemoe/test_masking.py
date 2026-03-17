@@ -1,22 +1,12 @@
-"""
-RED test stubs for GradientMasker and ActivationMasker (MASK-01, MASK-02, MASK-04).
+"""Tests for GradientMasker and ActivationMasker."""
 
-These tests will fail with ImportError until safemoe/masking.py is implemented
-in plan 02-04. This is the intended RED state.
-"""
-
-import pytest
 import torch
-import torch.nn as nn
-
-# These imports will raise ImportError until implementation plans run.
-# That ImportError is the expected RED state for this plan.
-from safemoe.masking import HarmfulParamRegistry, GradientMasker, ActivationMasker
-from safemoe.config import SafeMoEConfig
 
 import litgpt
+from safemoe.config import SafeMoEConfig
+from safemoe.masking import ActivationMasker, GradientMasker, HarmfulParamRegistry
 
-# Small config dimensions for CPU-only tests (< 5 seconds).
+
 SMALL_CONFIG = dict(
     padded_vocab_size=1024,
     vocab_size=1024,
@@ -35,11 +25,8 @@ SMALL_CONFIG = dict(
 )
 
 
-def test_gradient_masker_zeroes_theta_std_grads():
-    """
-    MASK-01: After backward on a D_harmful batch + gradient_masker.mask(),
-    all theta_std gradients are None and all theta_harmful gradients are not None.
-    """
+def test_gradient_masker_zeroes_theta_std_grads_on_harmful_step():
+    """D_harmful masking must clear theta_std grads but keep harmful/shared grads."""
     config = SafeMoEConfig(**SMALL_CONFIG)
     model = litgpt.GPT(config)
     model.train()
@@ -47,87 +34,51 @@ def test_gradient_masker_zeroes_theta_std_grads():
     registry = HarmfulParamRegistry(model, config)
     gradient_masker = GradientMasker(registry)
 
-    # Build a tiny random input batch: (batch=1, seq_len=4)
-    batch_size, seq_len = 1, 4
-    input_ids = torch.randint(0, config.padded_vocab_size, (batch_size, seq_len))
-
-    # Forward + backward on simulated D_harmful batch
+    input_ids = torch.randint(0, config.padded_vocab_size, (1, 4))
     logits = model(input_ids)
     loss = logits.sum()
     loss.backward()
 
-    # Apply gradient masking
-    gradient_masker.mask()
+    gradient_masker.mask("D_harmful")
 
-    # All theta_std gradients must be None after masking
     for p in registry.parameters_by_type("theta_std"):
-        assert p.grad is None, (
-            "GradientMasker.mask() should set theta_std gradients to None, "
-            f"but found non-None grad with shape {p.grad.shape}"
-        )
+        assert p.grad is None, "theta_std grads must be cleared on D_harmful"
 
-    # At least some theta_harmful gradients must be non-None (they received signal)
-    harmful_params = registry.parameters_by_type("theta_harmful")
-    non_none_harmful = [p for p in harmful_params if p.grad is not None]
-    assert len(non_none_harmful) > 0, (
-        "After D_harmful backward, at least some theta_harmful params must have non-None grad"
-    )
+    assert any(p.grad is not None for p in registry.parameters_by_type("theta_harmful"))
+    assert any(p.grad is not None for p in registry.parameters_by_type("theta_shared"))
 
 
 def test_activation_masker_zeroes_harmful_expert_output():
-    """
-    MASK-02: With ActivationMasker enabled, SafeMoELayer._activation_masking_enabled
-    is True on every layer; the model still runs without error.
-    When masker is disabled, _activation_masking_enabled is False on every layer.
-    """
+    """ActivationMasker must toggle SafeMoELayer masking flags without breaking forward."""
     config = SafeMoEConfig(**SMALL_CONFIG)
     model = litgpt.GPT(config)
     model.eval()
 
     activation_masker = ActivationMasker(model)
 
-    # Before enable: all SafeMoELayer instances have masking disabled
     from safemoe.model import SafeMoELayer
+
     safemoe_layers = [m for m in model.modules() if isinstance(m, SafeMoELayer)]
-    assert len(safemoe_layers) > 0, "Model must contain at least one SafeMoELayer"
+    assert len(safemoe_layers) > 0
 
     for layer in safemoe_layers:
-        assert not layer._activation_masking_enabled, (
-            "Before enable(), _activation_masking_enabled must be False"
-        )
+        assert not layer._activation_masking_enabled
 
-    # Enable masking
     activation_masker.enable()
-
     for layer in safemoe_layers:
-        assert layer._activation_masking_enabled, (
-            "After enable(), _activation_masking_enabled must be True"
-        )
+        assert layer._activation_masking_enabled
 
-    # Model forward should still run without error with masking enabled
-    input_ids = torch.randint(0, config.padded_vocab_size, (1, 4))
     with torch.no_grad():
-        output = model(input_ids)
-    assert output is not None, "Model forward with activation masking enabled must not crash"
+        output = model(torch.randint(0, config.padded_vocab_size, (1, 4)))
+    assert output is not None
 
-    # Disable masking
     activation_masker.disable()
-
     for layer in safemoe_layers:
-        assert not layer._activation_masking_enabled, (
-            "After disable(), _activation_masking_enabled must be False"
-        )
+        assert not layer._activation_masking_enabled
 
 
 def test_masking_invariants_combined():
-    """
-    MASK-04 (partial): Combined D_harmful and D_std step sequence does not corrupt
-    each other's gradient state.
-
-    D_harmful step: backward + gradient_masker.mask() -> theta_std.grad is None
-    D_std step: activation_masker.enable() + forward + activation_masker.disable()
-    After both steps: neither step corrupts the other's state.
-    """
+    """D_harmful must clear std grads; D_std must clear harmful grads."""
     config = SafeMoEConfig(**SMALL_CONFIG)
     model = litgpt.GPT(config)
     model.train()
@@ -138,77 +89,85 @@ def test_masking_invariants_combined():
 
     input_ids = torch.randint(0, config.padded_vocab_size, (1, 4))
 
-    # --- D_harmful step ---
     model.zero_grad(set_to_none=True)
     logits = model(input_ids)
-    loss_harmful = logits.sum()
-    loss_harmful.backward()
-    gradient_masker.mask()
+    logits.sum().backward()
+    gradient_masker.mask("D_harmful")
 
-    # After D_harmful step: theta_std grads must all be None
     for p in registry.parameters_by_type("theta_std"):
-        assert p.grad is None, (
-            "After D_harmful step, theta_std.grad must be None (gradient masking applied)"
-        )
+        assert p.grad is None
+    assert any(p.grad is not None for p in registry.parameters_by_type("theta_shared"))
 
-    # --- D_std step ---
     model.zero_grad(set_to_none=True)
     activation_masker.enable()
-    logits2 = model(input_ids)
-    loss_std = logits2.sum()
-    loss_std.backward()
+    logits = model(input_ids)
+    logits.sum().backward()
     activation_masker.disable()
+    gradient_masker.mask("D_std")
 
-    # After D_std step: activation masking must be restored to disabled
+    for p in registry.parameters_by_type("theta_harmful"):
+        assert p.grad is None
+
     from safemoe.model import SafeMoELayer
+
     for layer in [m for m in model.modules() if isinstance(m, SafeMoELayer)]:
-        assert not layer._activation_masking_enabled, (
-            "After D_std step, activation masking must be disabled (disable() was called)"
-        )
+        assert not layer._activation_masking_enabled
 
 
-def test_set_to_none_adam_state_integrity():
-    """
-    MASK-04: Two AdamW optimizers (one for theta_harmful, one for theta_std)
-    with zero_grad(set_to_none=True).
-    After one D_harmful step with gradient masking, theta_std optimizer has
-    no accumulated momentum state (state dict is empty for theta_std params).
-    """
-    config = SafeMoEConfig(**SMALL_CONFIG)
+def test_gradient_masker_splits_qkv_rows_by_attention_head():
+    """With harmful_attn_heads set, D_harmful should preserve only harmful qkv rows."""
+    config = SafeMoEConfig(**{**SMALL_CONFIG, "harmful_attn_heads": [0, 1]})
     model = litgpt.GPT(config)
     model.train()
 
     registry = HarmfulParamRegistry(model, config)
     gradient_masker = GradientMasker(registry)
 
-    harmful_params = registry.parameters_by_type("theta_harmful")
-    std_params = registry.parameters_by_type("theta_std")
+    input_ids = torch.randint(0, config.padded_vocab_size, (1, 4))
+    logits = model(input_ids)
+    logits.sum().backward()
 
-    harmful_optimizer = torch.optim.AdamW(harmful_params, lr=1e-3)
-    std_optimizer = torch.optim.AdamW(std_params, lr=1e-3)
+    gradient_masker.mask("D_harmful")
+
+    qkv_seen = 0
+    for (param_h, harmful_slices), (_, std_slices) in zip(
+        registry._qkv_harmful_metadata, registry._qkv_std_metadata
+    ):
+        qkv_seen += 1
+        assert param_h.grad is not None, "qkv.grad should remain allocated for slice masking"
+        harmful_norm = sum(param_h.grad[s].abs().sum().item() for s in harmful_slices)
+        assert harmful_norm > 0, "harmful head rows should retain gradient on D_harmful"
+        for s in std_slices:
+            assert (param_h.grad[s] == 0).all(), "std head rows should be zeroed on D_harmful"
+
+    assert qkv_seen > 0, "Expected qkv metadata to be populated"
+
+
+def test_single_optimizer_state_integrity():
+    """With one optimizer, masked theta_std params must not accumulate Adam state."""
+    config = SafeMoEConfig(**SMALL_CONFIG)
+    model = litgpt.GPT(config)
+    model.train()
+
+    registry = HarmfulParamRegistry(model, config)
+    gradient_masker = GradientMasker(registry)
+    params = (
+        registry.parameters_by_type("theta_harmful")
+        + registry.parameters_by_type("theta_std")
+        + registry.parameters_by_type("theta_shared")
+    )
+    optimizer = torch.optim.AdamW(params, lr=1e-3)
 
     input_ids = torch.randint(0, config.padded_vocab_size, (1, 4))
 
-    # D_harmful step: zero_grad, forward, backward, mask, step harmful optimizer only
-    harmful_optimizer.zero_grad(set_to_none=True)
-    std_optimizer.zero_grad(set_to_none=True)
-
+    optimizer.zero_grad(set_to_none=True)
     logits = model(input_ids)
-    loss = logits.sum()
-    loss.backward()
+    logits.sum().backward()
+    gradient_masker.mask("D_harmful")
+    optimizer.step()
 
-    gradient_masker.mask()
-    harmful_optimizer.step()
-    # Deliberately do NOT step std_optimizer
+    for p in registry.parameters_by_type("theta_std"):
+        assert len(optimizer.state.get(p, {})) == 0
 
-    # After stepping only harmful_optimizer, std_optimizer state must remain empty
-    # (no momentum accumulated for theta_std params since they had no gradients)
-    for param_group in std_optimizer.param_groups:
-        for p in param_group["params"]:
-            state = std_optimizer.state.get(p, {})
-            # Adam state keys: 'step', 'exp_avg', 'exp_avg_sq'
-            # If step() was never called for std_optimizer, state must be empty
-            assert len(state) == 0, (
-                f"theta_std param should have no Adam state after D_harmful step, "
-                f"but found state keys: {list(state.keys())}"
-            )
+    assert any(len(optimizer.state.get(p, {})) > 0 for p in registry.parameters_by_type("theta_harmful"))
+    assert any(len(optimizer.state.get(p, {})) > 0 for p in registry.parameters_by_type("theta_shared"))

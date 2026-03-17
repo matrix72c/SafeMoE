@@ -1,5 +1,5 @@
 # Copyright Lightning AI. Licensed under the Apache License 2.0, see LICENSE file.
-# SGTM: forked from litgpt/pretrain.py — adds dual-optimizer 3-path SGTM training loop.
+# SGTM: forked from litgpt/pretrain.py — adds single-optimizer 3-path SGTM training loop.
 
 import math
 import pprint
@@ -48,7 +48,7 @@ from litgpt.utils import (
     save_config,
 )
 
-# SGTM: safemoe-specific imports for dual-optimizer and masking infrastructure
+# SGTM: safemoe-specific imports for single-optimizer masking infrastructure
 from safemoe.config import SafeMoEConfig
 from safemoe.data.datamodule import MultiDataLoader
 from safemoe.masking import ActivationMasker, GradientMasker, HarmfulParamRegistry
@@ -223,7 +223,7 @@ def setup(
     upsample_harmful: Optional[float] = None,
     upsample_unlabeled: Optional[float] = None,
 ):
-    """Pretrain a SafeMoE model with SGTM dual-optimizer 3-path training loop.
+    """Pretrain a SafeMoE model with SGTM single-optimizer 3-path training loop.
 
     Arguments:
         model_name: The name of the model to pretrain. Choose from names in ``litgpt.config``. Use "list" to list the supported models.
@@ -328,7 +328,7 @@ def setup(
 
 
 # ---------------------------------------------------------------------------
-# main() — SGTM: dual optimizer + HarmfulParamRegistry + masker instantiation
+# main() — SGTM: single optimizer + HarmfulParamRegistry + masker instantiation
 # ---------------------------------------------------------------------------
 
 def main(
@@ -401,15 +401,16 @@ def main(
         _raw = _raw.module        # DDP only — strip the "module." prefix
     registry = HarmfulParamRegistry(_raw, config)
 
-    # SGTM: dual optimizer setup AFTER fabric.setup(model) — params are now materialized.
+    # SGTM: single optimizer setup AFTER fabric.setup(model) — params are now materialized.
     extra_kwargs = {"fused": fabric.device.type == "cuda"}
-    optimizer_harmful = instantiate_torch_optimizer(
-        optimizer, registry.parameters_by_type("theta_harmful"), **extra_kwargs
+    optimizer = instantiate_torch_optimizer(
+        optimizer,
+        registry.parameters_by_type("theta_harmful")
+        + registry.parameters_by_type("theta_std")
+        + registry.parameters_by_type("theta_shared"),
+        **extra_kwargs,
     )
-    optimizer_std = instantiate_torch_optimizer(
-        optimizer, registry.parameters_by_type("theta_std"), **extra_kwargs
-    )
-    optimizer_harmful, optimizer_std = fabric.setup_optimizers(optimizer_harmful, optimizer_std)
+    optimizer = fabric.setup_optimizers(optimizer)
 
     train_dataloader, val_dataloader = get_dataloaders(fabric, data, tokenizer, train, model.max_seq_length)
     # SGTM: only val_dataloader is fabric-wrapped; split loaders are accessed via data.get_loader()
@@ -422,11 +423,10 @@ def main(
     if initial_checkpoint_dir:
         fabric.load_raw(initial_checkpoint_dir / "lit_model.pth", model)
 
-    # SGTM: state dict with dual optimizer keys (replaces single "optimizer" key)
+    # SGTM: state dict with a single optimizer covering harmful/std/shared params
     state = {
         "model": model,
-        "optimizer_harmful": optimizer_harmful,
-        "optimizer_std": optimizer_std,
+        "optimizer": optimizer,
         "iter_num": 0,
         "step_count": 0,
         "split_label": "D_std",
@@ -527,9 +527,7 @@ def fit(
     val_loaders: Optional[dict] = None,
 ) -> None:
     model = state["model"]
-    # SGTM: dual optimizers from state dict
-    optimizer_harmful = state["optimizer_harmful"]
-    optimizer_std = state["optimizer_std"]
+    optimizer = state["optimizer"]
 
     if eval.initial_validation:
         val_loss = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
@@ -584,12 +582,11 @@ def fit(
         split_label = random.choices(SPLIT_LABELS, weights=weights, k=1)[0]
         state["split_label"] = split_label
 
-        # SGTM: dual LR update — same cosine schedule for both optimizers (Pattern 4)
-        base_lr = optimizer_std.defaults["lr"]
+        # SGTM: LR update for the shared optimizer
+        base_lr = optimizer.defaults["lr"]
         lr = get_lr(base_lr, state["iter_num"], warmup_iters, max_iters, train.min_lr)
-        for opt in (optimizer_harmful, optimizer_std):
-            for pg in opt.param_groups:
-                pg["lr"] = lr
+        for pg in optimizer.param_groups:
+            pg["lr"] = lr
 
         # SGTM: 3-path masking template (Pattern 2)
         # D_std: enable activation masker before the micro-batch window; disable in finally
@@ -618,28 +615,12 @@ def fit(
             if split_label == "D_std":
                 activation_masker.disable()
 
-        # SGTM: per-split optimizer step (Pattern 2)
-        if split_label == "D_std":
-            fabric.clip_gradients(model, optimizer_std, max_norm=train.max_norm)
-            optimizer_std.step()
-            optimizer_std.zero_grad(set_to_none=True)
-            # Keep theta_harmful grads cleared for isolation
-            optimizer_harmful.zero_grad(set_to_none=True)
-        elif split_label == "D_harmful":
-            # SGTM: gradient_masker.mask() called ONCE per optimizer step (not per micro-batch)
-            gradient_masker.mask()
-            fabric.clip_gradients(model, optimizer_harmful, max_norm=train.max_norm)
-            optimizer_harmful.step()
-            optimizer_harmful.zero_grad(set_to_none=True)
-            optimizer_std.zero_grad(set_to_none=True)
-        else:  # D_unlabeled
-            # SGTM: no masking — both optimizers step
-            fabric.clip_gradients(model, optimizer_harmful, max_norm=train.max_norm)
-            fabric.clip_gradients(model, optimizer_std, max_norm=train.max_norm)
-            optimizer_harmful.step()
-            optimizer_std.step()
-            optimizer_harmful.zero_grad(set_to_none=True)
-            optimizer_std.zero_grad(set_to_none=True)
+        # SGTM: per-split masking then one optimizer step
+        if split_label != "D_unlabeled":
+            gradient_masker.mask(split_label)
+        fabric.clip_gradients(model, optimizer, max_norm=train.max_norm)
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
 
         state["step_count"] += 1
 
@@ -777,8 +758,8 @@ def validate(
     for k, batch in enumerate(val_dataloader):
         if k >= max_iters:
             break
-        input_ids = batch[:, 0 : model.max_seq_length].contiguous().long()
-        targets = batch[:, 1 : (model.max_seq_length + 1)].contiguous().long()
+        input_ids = batch[:, 0 : model.max_seq_length].contiguous().long().to(fabric.device)
+        targets = batch[:, 1 : (model.max_seq_length + 1)].contiguous().long().to(fabric.device)
         logits = model(input_ids)
         loss = chunked_cross_entropy(logits, targets)
         losses.append(loss)
@@ -867,18 +848,7 @@ def save_checkpoint(fabric, state, tokenizer_dir, checkpoint_file):
     model = state["model"]
     checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
     fabric.print(f"Saving checkpoint to {str(checkpoint_file)!r}")
-    if isinstance(fabric.strategy, FSDPStrategy):
-        # FSDP's optim_state_dict() requires each optimizer to own ALL FSDP-sharded params.
-        # With split optimizers (theta_harmful / theta_std) each owns only a subset, so
-        # we save model weights + scalars only — optimizer state cannot be consolidated.
-        fabric.save(checkpoint_file, {
-            "model": state["model"],
-            "iter_num": state["iter_num"],
-            "step_count": state["step_count"],
-            "split_label": state["split_label"],
-        })
-    else:
-        fabric.save(checkpoint_file, state)
+    fabric.save(checkpoint_file, state)
     if fabric.global_rank == 0:
         save_hyperparameters(setup, checkpoint_file.parent)
         if tokenizer_dir is not None:

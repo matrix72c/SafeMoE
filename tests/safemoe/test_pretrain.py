@@ -170,20 +170,19 @@ def _setup_fit_test(
     fabric.launch()
     model = fabric.setup(model)
 
-    # Dual optimizers (fused=False on CPU)
+    # Single optimizer over harmful/std/shared parameter groups (fused=False on CPU)
     from litgpt.utils import instantiate_torch_optimizer
-    optimizer_harmful = instantiate_torch_optimizer(
-        "AdamW", registry.parameters_by_type("theta_harmful")
+    optimizer = instantiate_torch_optimizer(
+        "AdamW",
+        registry.parameters_by_type("theta_harmful")
+        + registry.parameters_by_type("theta_std")
+        + registry.parameters_by_type("theta_shared"),
     )
-    optimizer_std = instantiate_torch_optimizer(
-        "AdamW", registry.parameters_by_type("theta_std")
-    )
-    optimizer_harmful, optimizer_std = fabric.setup_optimizers(optimizer_harmful, optimizer_std)
+    optimizer = fabric.setup_optimizers(optimizer)
 
     state = {
         "model": model,
-        "optimizer_harmful": optimizer_harmful,
-        "optimizer_std": optimizer_std,
+        "optimizer": optimizer,
         "iter_num": 0,
         "step_count": 0,
         "split_label": "D_std",
@@ -224,11 +223,11 @@ def _setup_fit_test(
 # ===========================================================================
 
 def test_fit_harmful_step_masks_theta_std():
-    """TRAIN-01: After one D_harmful optimizer step, all theta_std params have grad=None.
+    """TRAIN-01: D_harmful updates harmful/shared params and harmful qkv rows only.
 
     Forces split to D_harmful via upsample weights (0, 1, 0), runs exactly one optimizer
-    step, then asserts every theta_std parameter has grad is None (GradientMasker.mask()
-    zeroed them before the optimizer step, and zero_grad(set_to_none=True) clears them).
+    step, then asserts non-qkv theta_std params have no post-step grads or Adam state
+    while harmful/shared params do accumulate optimizer state.
     """
     fabric, state, data, val_dataloader, registry, gradient_masker, activation_masker, train_args, eval_args = (
         _setup_fit_test(global_batch_size=1, micro_batch_size=1, max_tokens=128, block_size=128)
@@ -252,15 +251,32 @@ def test_fit_harmful_step_masks_theta_std():
         upsample_unlabeled=0.0,
     )
 
-    # After D_harmful step: GradientMasker.mask() sets theta_std grads to None,
-    # then optimizer_std.zero_grad(set_to_none=True) also clears them — either way None.
+    qkv_param_ids = {id(param) for param, _ in registry._qkv_harmful_metadata}
     theta_std_params = registry.parameters_by_type("theta_std")
     assert len(theta_std_params) > 0, "registry must have theta_std params"
     for param in theta_std_params:
-        assert param.grad is None, (
-            f"Expected theta_std param grad to be None after D_harmful step, "
-            f"but got grad with shape {param.grad.shape if param.grad is not None else None}"
-        )
+        if id(param) in qkv_param_ids:
+            assert param.grad is None or param.grad.shape == param.shape
+            assert len(state["optimizer"].state.get(param, {})) > 0, (
+                "qkv params should accumulate optimizer state for harmful heads on D_harmful"
+            )
+        else:
+            assert param.grad is None, (
+                f"Expected theta_std param grad to be None after D_harmful step, "
+                f"but got grad with shape {param.grad.shape if param.grad is not None else None}"
+            )
+            assert len(state["optimizer"].state.get(param, {})) == 0, (
+                "non-qkv theta_std params must not accumulate optimizer state on D_harmful"
+            )
+
+    assert any(
+        len(state["optimizer"].state.get(param, {})) > 0
+        for param in registry.parameters_by_type("theta_harmful")
+    ), "theta_harmful params should accumulate optimizer state on D_harmful"
+    assert any(
+        len(state["optimizer"].state.get(param, {})) > 0
+        for param in registry.parameters_by_type("theta_shared")
+    ), "theta_shared params should accumulate optimizer state on D_harmful"
 
 
 def test_fit_std_step_enables_activation_masker():
@@ -313,12 +329,10 @@ def test_fit_std_step_enables_activation_masker():
 
 
 def test_fit_unlabeled_step_no_masking():
-    """TRAIN-02: D_unlabeled step runs without masking, both optimizers step.
+    """TRAIN-02: D_unlabeled step runs without masking and updates all groups.
 
     Forces split to D_unlabeled via upsample weights (0, 0, 1). Patches mask(),
-    enable(), and disable() with MagicMock to verify none are called. Also verifies
-    both optimizer_harmful and optimizer_std stepped by checking that their respective
-    parameter groups had their gradients zeroed after a step (set_to_none=True).
+    enable(), and disable() with MagicMock to verify none are called.
     """
     fabric, state, data, val_dataloader, registry, gradient_masker, activation_masker, train_args, eval_args = (
         _setup_fit_test(global_batch_size=1, micro_batch_size=1, max_tokens=128, block_size=128)
@@ -364,12 +378,15 @@ def test_fit_unlabeled_step_no_masking():
         f"got {mock_disable.call_count} calls"
     )
 
-    # Verify both optimizer groups stepped: after zero_grad(set_to_none=True), grads are None
-    # Both optimizers should have stepped — check that step_count incremented
     assert state["step_count"] == 1, (
         f"Expected step_count == 1 after one D_unlabeled optimizer step, "
         f"got {state['step_count']}"
     )
+    for group_name in ("theta_harmful", "theta_std", "theta_shared"):
+        assert any(
+            len(state["optimizer"].state.get(param, {})) > 0
+            for param in registry.parameters_by_type(group_name)
+        ), f"{group_name} should accumulate optimizer state on D_unlabeled"
 
 
 def test_masker_called_once_per_step():
@@ -420,9 +437,7 @@ def test_masker_called_once_per_step():
 # ===========================================================================
 
 def test_attn_head_gradient_masking():
-    """TRAIN-01: After D_harmful backward with harmful_attn_heads=[0,1],
-    qkv.weight.grad rows for heads 0 and 1 are zero; rows for heads 2+ are non-zero.
-    """
+    """TRAIN-01: D_harmful keeps harmful qkv head rows and zeros std-head rows."""
     model, registry, config = _build_model_and_registry()
 
     gradient_masker = GradientMasker(registry)
@@ -433,37 +448,19 @@ def test_attn_head_gradient_masking():
     loss = logits.sum()
     loss.backward()
 
-    # Apply gradient masking
-    gradient_masker.mask()
+    gradient_masker.mask("D_harmful")
 
-    # Verify: for each qkv param, harmful-head row slices are zero
-    assert len(registry._qkv_harmful_metadata) > 0, (
-        "registry._qkv_harmful_metadata must be non-empty when harmful_attn_heads=[0,1]"
-    )
-
-    for param, slices in registry._qkv_harmful_metadata:
-        assert param.grad is not None, (
-            "qkv.weight.grad must not be None after D_harmful backward "
-            "(it is in theta_std but not wiped by Phase 3 gradient masker)"
-        )
-        for s in slices:
-            assert (param.grad[s] == 0).all(), (
-                f"qkv.weight.grad[{s}] must be zero after mask() for harmful head rows, "
-                f"but found non-zero values: {param.grad[s]}"
-            )
-
-        # At least some rows outside the harmful slices must be non-zero
-        # Build a mask of zeroed rows
-        n_rows = param.grad.shape[0]
-        zeroed_rows = set()
-        for s in slices:
-            zeroed_rows.update(range(*s.indices(n_rows)))
-        std_rows = [i for i in range(n_rows) if i not in zeroed_rows]
-        assert len(std_rows) > 0, "There must be at least one standard (non-harmful) head row"
-        std_grad = param.grad[std_rows]
-        assert std_grad.abs().sum() > 0, (
-            "Standard-head rows of qkv.weight.grad must be non-zero after D_harmful backward"
-        )
+    qkv_seen = 0
+    for (param_h, harmful_slices), (_, std_slices) in zip(
+        registry._qkv_harmful_metadata, registry._qkv_std_metadata
+    ):
+        qkv_seen += 1
+        assert param_h.grad is not None, "qkv.grad must remain allocated for row masking"
+        harmful_norm = sum(param_h.grad[s].abs().sum().item() for s in harmful_slices)
+        assert harmful_norm > 0, "harmful head rows should retain gradient on D_harmful"
+        for s in std_slices:
+            assert (param_h.grad[s] == 0).all(), "std head rows must be zeroed on D_harmful"
+    assert qkv_seen > 0, "Expected to find at least one qkv.weight parameter"
 
 
 def test_attn_head_activation_masking():
