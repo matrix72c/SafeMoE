@@ -1,0 +1,59 @@
+# SafeMoE TinyStories config tuned for stronger harmful-split modeling under
+# the single-optimizer std/harmful/shared setup.
+#
+# Main changes relative to safemoe-tinystories.yaml:
+# - y: 25 -> 50
+#   More EN goes to D_std and less EN leaks into D_unlabeled, so harmful params
+#   see less English-only traffic during all-parameter updates.
+# - upsample_harmful: 1 -> 2
+#   Harmful-exclusive updates happen more often.
+# - upsample_unlabeled: 1 -> 0.5
+#   Reduces dilution from D_unlabeled, which updates all parameter groups.
+# - x stays 0
+#   Keep all ES rows in D_harmful so harmful-exclusive training remains maximal.
+
+model_name: safemoe-tinystories
+
+tokenizer_dir: checkpoints/Qwen3-30B-A3B-Base
+
+model_config:
+  name: safemoe-tinystories
+  block_size: 256
+  vocab_size: 151643
+  padded_vocab_size: 152064
+  n_layer: 4
+  n_head: 4
+  n_query_groups: 4
+  n_embd: 128
+  head_size: 32
+  rotary_percentage: 1.0
+  parallel_residual: false
+  bias: false
+  norm_class_name: RMSNorm
+  mlp_class_name: LLaMAMoE
+  moe_intermediate_size: 256
+  n_expert: 8
+  n_expert_per_token: 2
+  harmful_expert_indices: [0, 1]
+  num_harmful_experts: 2
+  harmful_attn_heads: [0, 1]
+
+train:
+  micro_batch_size: 4
+  global_batch_size: 16
+  save_interval: 200
+  log_interval: 10
+  max_tokens: 300000000
+
+data:
+  class_path: safemoe.data.datamodule.MultiDataLoader
+  init_args:
+    cache_dir: data/.cache
+    x: 0
+    y: 50
+    seed: 42
+    num_workers: 4
+
+upsample_std: 1
+upsample_harmful: 2
+upsample_unlabeled: 0.5
