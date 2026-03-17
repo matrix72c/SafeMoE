@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
@@ -141,6 +142,29 @@ def test_evaluate_perplexity(tmp_path: Path) -> None:
     assert results_path.exists(), "results.json must be written to out_dir"
     written = json.loads(results_path.read_text())
     assert "original" in written and "ablated" in written and "delta" in written
+
+
+def test_evaluate_perplexity_current_dir_shell_hint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A current-directory checkpoint path should explain the common temporary-env trap."""
+    from safemoe.evaluate import evaluate_perplexity
+
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(FileNotFoundError, match="temporary shell assignment"):
+        evaluate_perplexity(original_ckpt_dir=Path("."), data_mock=_MockDataModule(), out_dir=tmp_path)
+
+
+def test_evaluate_cli_shell_assignment_hint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The evaluate CLI should explain the inline env-assignment trap."""
+    from safemoe.__main__ import main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CKPT_DIR", "checkpoints/safemoe-tinystories-v2/final")
+
+    argv = ["safemoe", "evaluate", "", "--ablated", "/ablated"]
+    with pytest.raises(FileNotFoundError, match="temporary shell assignment"):
+        with mock.patch("sys.argv", argv):
+            main()
 
 
 # ---------------------------------------------------------------------------

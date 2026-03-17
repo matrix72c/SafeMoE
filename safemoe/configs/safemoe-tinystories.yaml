@@ -38,8 +38,8 @@ model_config:
 train:
   micro_batch_size: 4
   global_batch_size: 16
-  save_interval: 200
-  log_interval: 10
+  save_interval: 2000
+  log_interval: 100
   max_tokens: 300000000
 
 # Data module — MultiDataLoader instantiated via jsonargparse class_path syntax.

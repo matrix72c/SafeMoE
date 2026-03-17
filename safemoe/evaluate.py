@@ -13,6 +13,7 @@ import yaml
 from torch.utils.data import DataLoader
 
 from litgpt.model import GPT
+from litgpt.utils import check_valid_checkpoint_dir
 from safemoe.config import SafeMoEConfig
 from safemoe.masking import HarmfulParamRegistry
 from safemoe.model import SafeMoELayer
@@ -24,6 +25,30 @@ from safemoe.pretrain import validate
 # ---------------------------------------------------------------------------
 
 
+def _ensure_checkpoint_dir(ckpt_dir: Path) -> Path:
+    """Validate a checkpoint directory before attempting to read model files."""
+    ckpt_dir = Path(ckpt_dir)
+    try:
+        check_valid_checkpoint_dir(
+            ckpt_dir,
+            raise_error=True,
+            verbose=False,
+            ignore_tokenizer_files=True,
+        )
+    except FileNotFoundError as exc:
+        if ckpt_dir == Path("."):
+            raise FileNotFoundError(
+                f"{exc} checkpoint_dir resolved to the current working directory (`.`). "
+                "If you used a temporary shell assignment such as "
+                '`CKPT_DIR=... python -m safemoe evaluate "$CKPT_DIR"` or '
+                '`CKPT_DIR=... python -m safemoe evaluate "$CKPT_DIR" --ablated "$CKPT_DIR/ablated"`, '
+                "the shell expands `$CKPT_DIR` before that assignment applies. "
+                "Export `CKPT_DIR` first or pass the checkpoint path literally."
+            ) from exc
+        raise
+    return ckpt_dir
+
+
 def _load_model(ckpt_dir: Path) -> tuple:
     """Load a SafeMoE model from a checkpoint directory.
 
@@ -31,7 +56,7 @@ def _load_model(ckpt_dir: Path) -> tuple:
     The model is loaded from lit_model.pth, set to eval(), and returned raw
     (not wrapped by fabric) so callers can choose their own fabric setup.
     """
-    ckpt_dir = Path(ckpt_dir)
+    ckpt_dir = _ensure_checkpoint_dir(ckpt_dir)
     raw = yaml.safe_load((ckpt_dir / "model_config.yaml").read_text())
     config = SafeMoEConfig(**{k: v for k, v in raw.items() if not isinstance(v, dict)})
 
@@ -232,7 +257,7 @@ def setup(
     ablated: Optional[Path] = None,
     routing: bool = False,
 ) -> None:
-    """CLI: python -m safemoe evaluate --original <ckpt_dir> [--ablated <path>] [--routing]."""
+    """CLI: python -m safemoe evaluate <ckpt_dir> [--ablated <path>] [--routing]."""
     original = Path(original)
     if routing:
         routing_attribution(original)
