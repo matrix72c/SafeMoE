@@ -1,0 +1,37 @@
+model_name: Qwen3-30B-A3B-Base
+tokenizer_dir: checkpoints/Qwen3-30B-A3B-Base
+devices: 4
+num_nodes: 1
+seed: 42
+logger_name: tensorboard
+
+train:
+  micro_batch_size: 1
+  global_batch_size: 4
+  save_interval: null
+  log_interval: 1
+  max_tokens: 4096
+  max_steps: 1
+  max_seq_length: 1024
+  max_norm: 1.0
+  min_lr: 4.0e-05
+  lr_warmup_steps: 0
+
+eval:
+  interval: 999999
+  max_iters: 1
+  initial_validation: false
+  final_validation: false
+
+data:
+  class_path: safemoe.data.datamodule.MultiDataLoader
+  init_args:
+    cache_dir: data/.cache
+    x: 0
+    y: 25
+    seed: 42
+    num_workers: 4
+
+upsample_std: 1
+upsample_harmful: 1
+upsample_unlabeled: 1
