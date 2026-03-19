@@ -47,11 +47,11 @@ Plans:
   1. Researcher can generate a deterministic intervention manifest for a run, including expert/head selections, router-column mappings, seed, and noise scale.
   2. Researcher can apply the manifest to clone designated experts, attention heads, and router columns into `theta_harmful` while preserving a loadable checkpoint.
   3. Researcher can verify that post-surgery tensors and checkpoint metadata match the manifest’s source-to-target mapping and shape semantics.
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 06-01: Define manifest schema and deterministic intervention planning
-- [ ] 06-02: Implement Qwen checkpoint surgery and parity verification
+- [ ] 06-01-PLAN.md — Define the manifest schema, persistence helpers, and deterministic intervention planner
+- [ ] 06-02-PLAN.md — Implement manifest-backed checkpoint surgery, reload verification, and the researcher CLI
 
 ### Phase 7: Registry and Routing Observability
 **Goal**: Researcher can trust the direct-Qwen harmful/std/shared parameter registry and the routing signal used for supervision and evaluation.
