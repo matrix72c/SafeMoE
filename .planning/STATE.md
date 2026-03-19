@@ -5,16 +5,16 @@ milestone_name: Qwen Harmful Transfer
 current_phase: 7
 current_phase_name: registry and routing observability
 current_plan: 2
-status: in_progress
-stopped_at: Completed 07-01-PLAN.md
-last_updated: "2026-03-19T13:55:59.815Z"
+status: verifying
+stopped_at: Completed 07-02-PLAN.md
+last_updated: "2026-03-19T14:12:01.023Z"
 last_activity: 2026-03-19
 progress:
   total_phases: 6
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 6
-  completed_plans: 5
-  percent: 83
+  completed_plans: 6
+  percent: 100
 ---
 
 # Project State
@@ -33,10 +33,10 @@ See: .planning/PROJECT.md (updated 2026-03-19)
 **Total Phases:** 6
 **Current Plan:** 2
 **Total Plans in Phase:** 2
-**Status:** In progress
+**Status:** Phase complete — ready for verification
 **Last Activity:** 2026-03-19
 **Last Activity Description:** Completed Phase 07 Plan 01
-**Progress:** [████████░░] 83%
+**Progress:** [██████████] 100%
 
 ## Performance Metrics
 
@@ -60,6 +60,7 @@ See: .planning/PROJECT.md (updated 2026-03-19)
 | Phase 06-checkpoint-surgery P01 | 9min | 2 tasks | 4 files |
 | Phase 06-checkpoint-surgery P02 | 15min | 2 tasks | 6 files |
 | Phase 07-registry-and-routing-observability P01 | 9min | 2 tasks | 3 files |
+| Phase 07-registry-and-routing-observability P02 | 14min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -83,6 +84,8 @@ Recent decisions affecting current work:
 - [Phase 06]: Treat reload failures the same as parity mismatches: write FAIL verification artifacts and re-raise ValueError('Checkpoint surgery verification failed').
 - [Phase 07]: Kept router/gate parameters classified as theta_shared and exposed Phase 6 router-column lineage only as manifest provenance annotations.
 - [Phase 07]: Reported fused attn.qkv.weight ownership through additive attn_qkv_slice rows so full-parameter registry coverage stays exhaustive and non-overlapping.
+- [Phase 07]: Shared routing observability now lives in safemoe/observability.py so eval and pretrain reuse one collector, artifact writer, and parity helper.
+- [Phase 07]: routing_attribution() stays backward-compatible while also writing routing_observability artifacts with dispatch counts for observed splits only.
 
 ### Pending Todos
 
@@ -96,6 +99,6 @@ None recorded.
 
 ## Session Continuity
 
-Last session: 2026-03-19T13:55:59.790Z
-Stopped at: Completed 07-01-PLAN.md
+Last session: 2026-03-19T14:12:01.017Z
+Stopped at: Completed 07-02-PLAN.md
 Resume file: None
