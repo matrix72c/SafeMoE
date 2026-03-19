@@ -61,10 +61,10 @@ Plans:
   1. Researcher can inspect exhaustive, non-overlapping assignment of post-intervention parameters into `theta_harmful`, `theta_std`, and `theta_shared`.
   2. Researcher can collect comparable routing metrics for designated harmful experts during baseline, warmup, transfer, and ablation evaluation through one observability path.
   3. Researcher can confirm that the logged routing signal matches the actual dispatched expert behavior on the pinned Qwen stack.
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 07-01: Extend registry coverage and classification for direct Qwen interventions
+- [x] 07-01: Extend registry coverage and classification for direct Qwen interventions
 - [ ] 07-02: Add shared routing telemetry and parity checks for train/eval
 
 ### Phase 8: Warmup Separation
@@ -118,7 +118,7 @@ Phases execute in numeric order: 5 -> 6 -> 7 -> 8 -> 9 -> 10
 |-------|----------------|--------|-----------|
 | 5. Environment Runtime Gate | 2/2 | Complete | 2026-03-19 |
 | 6. Checkpoint Surgery | 1/2 | In Progress | - |
-| 7. Registry and Routing Observability | 0/2 | Not started | - |
+| 7. Registry and Routing Observability | 1/2 | In Progress | - |
 | 8. Warmup Separation | 0/2 | Not started | - |
 | 9. Mixed-Data Transfer | 0/2 | Not started | - |
 | 10. Evaluation and Adversarial-Cost Gate | 0/2 | Not started | - |

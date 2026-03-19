@@ -18,7 +18,7 @@
 
 ### Registry and Routing Observability
 
-- [ ] **ROUT-01**: Researcher can classify direct-Qwen parameters into `theta_harmful`, `theta_std`, and `theta_shared` with exhaustive, non-overlapping registry coverage after the intervention is applied.
+- [x] **ROUT-01**: Researcher can classify direct-Qwen parameters into `theta_harmful`, `theta_std`, and `theta_shared` with exhaustive, non-overlapping registry coverage after the intervention is applied.
 - [ ] **ROUT-02**: Researcher can capture per-split routing metrics for designated harmful experts during baseline, warmup, transfer, and ablation evaluation using one shared observability path.
 - [ ] **ROUT-03**: Researcher can verify that the routing signal used for supervision matches the real dispatched expert behavior for the pinned Qwen stack.
 
@@ -72,7 +72,7 @@
 | INIT-01 | Phase 6 | Complete |
 | INIT-02 | Phase 6 | Complete |
 | INIT-03 | Phase 6 | Complete |
-| ROUT-01 | Phase 7 | Pending |
+| ROUT-01 | Phase 7 | Complete |
 | ROUT-02 | Phase 7 | Pending |
 | ROUT-03 | Phase 7 | Pending |
 | WARM-01 | Phase 8 | Pending |
@@ -92,4 +92,4 @@
 
 ---
 *Requirements defined: 2026-03-19*
-*Last updated: 2026-03-19 after completing Phase 06 Plan 01*
+*Last updated: 2026-03-19 after completing Phase 07 Plan 01*

@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Qwen Harmful Transfer
-current_phase: 6
-current_phase_name: checkpoint surgery
+current_phase: 7
+current_phase_name: registry and routing observability
 current_plan: 2
-status: verifying
-stopped_at: Completed 06-02-PLAN.md
-last_updated: "2026-03-19T09:31:05.314Z"
+status: in_progress
+stopped_at: Completed 07-01-PLAN.md
+last_updated: "2026-03-19T13:55:59.815Z"
 last_activity: 2026-03-19
 progress:
   total_phases: 6
   completed_phases: 2
-  total_plans: 4
-  completed_plans: 4
-  percent: 100
+  total_plans: 6
+  completed_plans: 5
+  percent: 83
 ---
 
 # Project State
@@ -24,19 +24,19 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-19)
 
 **Core value:** Harmful knowledge must be fully containable in a designatable set of MoE experts that can be zeroed out at inference time without degrading general model capability.
-**Current focus:** Phase 6 - Checkpoint Surgery
+**Current focus:** Phase 7 - Registry and Routing Observability
 
 ## Current Position
 
-**Current Phase:** 6
-**Current Phase Name:** checkpoint surgery
+**Current Phase:** 7
+**Current Phase Name:** registry and routing observability
 **Total Phases:** 6
 **Current Plan:** 2
 **Total Plans in Phase:** 2
-**Status:** Phase complete — ready for verification
+**Status:** In progress
 **Last Activity:** 2026-03-19
-**Last Activity Description:** Completed Phase 06 Plan 01
-**Progress:** [██████████] 100%
+**Last Activity Description:** Completed Phase 07 Plan 01
+**Progress:** [████████░░] 83%
 
 ## Performance Metrics
 
@@ -51,13 +51,15 @@ See: .planning/PROJECT.md (updated 2026-03-19)
 |-------|-------|-------|----------|
 | 05-environment-runtime-gate | 2 | 62min | 31min |
 | 06-checkpoint-surgery | 1 | 9min | 9min |
+| 07-registry-and-routing-observability | 1 | 9min | 9min |
 
 **Recent Trend:**
-- Last 5 plans: 05-01 (5min), 05-02 (57min), 06-01 (9min)
+- Last 5 plans: 05-01 (5min), 05-02 (57min), 06-01 (9min), 07-01 (9min)
 - Trend: Improving
 - Phase 05-environment-runtime-gate P02 | 57min | 3 tasks | 7 files |
 | Phase 06-checkpoint-surgery P01 | 9min | 2 tasks | 4 files |
 | Phase 06-checkpoint-surgery P02 | 15min | 2 tasks | 6 files |
+| Phase 07-registry-and-routing-observability P01 | 9min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -79,6 +81,8 @@ Recent decisions affecting current work:
 - [Phase 06]: Manifest JSON persists only explicit expert/head selections plus seed and noise scale; router mappings stay derived.
 - [Phase 06]: Load SafeMoE checkpoint configs by filtering model_config.yaml through SafeMoEConfig fields so LitGPT-derived keys and harmful-layout metadata coexist cleanly.
 - [Phase 06]: Treat reload failures the same as parity mismatches: write FAIL verification artifacts and re-raise ValueError('Checkpoint surgery verification failed').
+- [Phase 07]: Kept router/gate parameters classified as theta_shared and exposed Phase 6 router-column lineage only as manifest provenance annotations.
+- [Phase 07]: Reported fused attn.qkv.weight ownership through additive attn_qkv_slice rows so full-parameter registry coverage stays exhaustive and non-overlapping.
 
 ### Pending Todos
 
@@ -92,6 +96,6 @@ None recorded.
 
 ## Session Continuity
 
-Last session: 2026-03-19T09:31:05.309Z
-Stopped at: Completed 06-02-PLAN.md
+Last session: 2026-03-19T13:55:59.790Z
+Stopped at: Completed 07-01-PLAN.md
 Resume file: None
