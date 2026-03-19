@@ -6,14 +6,14 @@ current_phase: 7
 current_phase_name: registry and routing observability
 current_plan: 2
 status: verifying
-stopped_at: Completed 07-02-PLAN.md
-last_updated: "2026-03-19T14:12:01.023Z"
+stopped_at: Completed 08-01-PLAN.md
+last_updated: "2026-03-19T15:50:25.554Z"
 last_activity: 2026-03-19
 progress:
   total_phases: 6
-  completed_phases: 3
-  total_plans: 6
-  completed_plans: 6
+  completed_phases: 4
+  total_plans: 8
+  completed_plans: 8
   percent: 100
 ---
 
@@ -61,6 +61,7 @@ See: .planning/PROJECT.md (updated 2026-03-19)
 | Phase 06-checkpoint-surgery P02 | 15min | 2 tasks | 6 files |
 | Phase 07-registry-and-routing-observability P01 | 9min | 2 tasks | 3 files |
 | Phase 07-registry-and-routing-observability P02 | 14min | 2 tasks | 5 files |
+| Phase 08 P01 | 7 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -86,6 +87,10 @@ Recent decisions affecting current work:
 - [Phase 07]: Reported fused attn.qkv.weight ownership through additive attn_qkv_slice rows so full-parameter registry coverage stays exhaustive and non-overlapping.
 - [Phase 07]: Shared routing observability now lives in safemoe/observability.py so eval and pretrain reuse one collector, artifact writer, and parity helper.
 - [Phase 07]: routing_attribution() stays backward-compatible while also writing routing_observability artifacts with dispatch counts for observed splits only.
+- [Phase 08]: Warmup stays on the existing setup -> main -> fit path and only swaps the active split set plus loss composition.
+- [Phase 08]: Routing supervision uses mean harmful-expert top-k probability mass collected from SafeMoELayer modules, not detached dispatch counts.
+- [Phase 08-warmup-separation]: Warmup acceptance compares the pre-warmup checkpoint against out_dir/final through the existing evaluate_perplexity and routing_attribution paths
+- [Phase 08-warmup-separation]: Warmup finalization fails closed unless routing margin improves beyond zero, reaches 0.10 post-warmup, and D_std perplexity stays within a 5% ratio bound
 
 ### Pending Todos
 
@@ -99,6 +104,6 @@ None recorded.
 
 ## Session Continuity
 
-Last session: 2026-03-19T14:12:01.017Z
-Stopped at: Completed 07-02-PLAN.md
+Last session: 2026-03-19T15:43:47.178Z
+Stopped at: Completed 08-01-PLAN.md
 Resume file: None

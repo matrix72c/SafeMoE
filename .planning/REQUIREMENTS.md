@@ -24,9 +24,9 @@
 
 ### Warmup Separation
 
-- [ ] **WARM-01**: Researcher can run a warmup stage on mixed `D_harmful` and `D_std` while keeping next-token loss active and logging routing loss separately from LM loss.
-- [ ] **WARM-02**: Researcher can apply a supervised routing objective that increases harmful-routing mass for `D_harmful` tokens and suppresses harmful-routing mass for `D_std` tokens.
-- [ ] **WARM-03**: Researcher can demonstrate, with a confound-controlled evaluation, that post-warmup `D_harmful` routes more strongly to `theta_harmful` than `D_std`.
+- [x] **WARM-01**: Researcher can run a warmup stage on mixed `D_harmful` and `D_std` while keeping next-token loss active and logging routing loss separately from LM loss.
+- [x] **WARM-02**: Researcher can apply a supervised routing objective that increases harmful-routing mass for `D_harmful` tokens and suppresses harmful-routing mass for `D_std` tokens.
+- [x] **WARM-03**: Researcher can demonstrate, with a confound-controlled evaluation, that post-warmup `D_harmful` routes more strongly to `theta_harmful` than `D_std`.
 
 ### Mixed-Data Transfer
 
@@ -75,9 +75,9 @@
 | ROUT-01 | Phase 7 | Complete |
 | ROUT-02 | Phase 7 | Complete |
 | ROUT-03 | Phase 7 | Complete |
-| WARM-01 | Phase 8 | Pending |
-| WARM-02 | Phase 8 | Pending |
-| WARM-03 | Phase 8 | Pending |
+| WARM-01 | Phase 8 | Complete |
+| WARM-02 | Phase 8 | Complete |
+| WARM-03 | Phase 8 | Complete |
 | XFER-01 | Phase 9 | Pending |
 | XFER-02 | Phase 9 | Pending |
 | XFER-03 | Phase 9 | Pending |
