@@ -17,8 +17,8 @@
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
 - [x] **Phase 5: Environment Runtime Gate** - Verify the direct-Qwen checkpoint loads cleanly and establish the BF16 runtime envelope for milestone runs.
-- [ ] **Phase 6: Checkpoint Surgery** - Create deterministic manifest-driven harmful expert and head cloning with loadable post-surgery checkpoints.
-- [ ] **Phase 7: Registry and Routing Observability** - Prove harmful/std/shared classification and routing telemetry are correct on the direct-Qwen stack.
+- [x] **Phase 6: Checkpoint Surgery** - Create deterministic manifest-driven harmful expert and head cloning with loadable post-surgery checkpoints. (completed 2026-03-19)
+- [x] **Phase 7: Registry and Routing Observability** - Prove harmful/std/shared classification and routing telemetry are correct on the direct-Qwen stack. (completed 2026-03-19)
 - [ ] **Phase 8: Warmup Separation** - Run routing-supervised warmup and verify harmful tokens separate from standard tokens under controlled evaluation.
 - [ ] **Phase 9: Mixed-Data Transfer** - Resume from warmup into SGTM-style transfer and track whether harmful capability stays concentrated in `theta_harmful`.
 - [ ] **Phase 10: Evaluation and Adversarial-Cost Gate** - Measure pre/post-ablation isolation quality and test whether adversarial recovery becomes materially harder.
@@ -51,7 +51,7 @@ Plans:
 
 Plans:
 - [x] 06-01-PLAN.md — Define the manifest schema, persistence helpers, and deterministic intervention planner
-- [ ] 06-02-PLAN.md — Implement manifest-backed checkpoint surgery, reload verification, and the researcher CLI
+- [x] 06-02-PLAN.md — Implement manifest-backed checkpoint surgery, reload verification, and the researcher CLI
 
 ### Phase 7: Registry and Routing Observability
 **Goal**: Researcher can trust the direct-Qwen harmful/std/shared parameter registry and the routing signal used for supervision and evaluation.
@@ -65,7 +65,7 @@ Plans:
 
 Plans:
 - [x] 07-01: Extend registry coverage and classification for direct Qwen interventions
-- [ ] 07-02: Add shared routing telemetry and parity checks for train/eval
+- [x] 07-02: Add shared routing telemetry and parity checks for train/eval
 
 ### Phase 8: Warmup Separation
 **Goal**: Researcher can use routing-supervised warmup to separate harmful and standard token flow before mixed-data transfer begins.
@@ -117,8 +117,8 @@ Phases execute in numeric order: 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 5. Environment Runtime Gate | 2/2 | Complete | 2026-03-19 |
-| 6. Checkpoint Surgery | 1/2 | In Progress | - |
-| 7. Registry and Routing Observability | 1/2 | In Progress | - |
+| 6. Checkpoint Surgery | 2/2 | Complete   | 2026-03-19 |
+| 7. Registry and Routing Observability | 2/2 | Complete   | 2026-03-19 |
 | 8. Warmup Separation | 0/2 | Not started | - |
 | 9. Mixed-Data Transfer | 0/2 | Not started | - |
 | 10. Evaluation and Adversarial-Cost Gate | 0/2 | Not started | - |
