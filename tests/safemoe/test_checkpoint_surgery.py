@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 
 import pytest
+import torch
+import yaml
+from litgpt.model import GPT
 
 from safemoe.config import SafeMoEConfig
 from safemoe.interventions.manifest import (
@@ -15,6 +18,7 @@ from safemoe.interventions.manifest import (
     save_manifest,
 )
 from safemoe.interventions.planner import plan_intervention_manifest
+from safemoe.surgery import setup as surgery_setup
 
 
 TINY_CONFIG = dict(
@@ -39,6 +43,13 @@ TINY_CONFIG = dict(
     harmful_attn_heads=[],
 )
 
+SIDECAR_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "config.json",
+    "generation_config.json",
+)
+
 
 def _make_manifest(*, manifest_id: str = "Qwen3-30B-A3B-Base-surgery-deadbeefcafe") -> InterventionManifest:
     return InterventionManifest(
@@ -59,6 +70,18 @@ def _make_manifest(*, manifest_id: str = "Qwen3-30B-A3B-Base-surgery-deadbeefcaf
         noise_scale=0.001,
         output_checkpoint_dirname=manifest_id,
     )
+
+
+def _write_synthetic_checkpoint(base_dir: Path) -> SafeMoEConfig:
+    config = SafeMoEConfig(**TINY_CONFIG)
+    torch.manual_seed(123)
+    model = GPT(config)
+    base_dir.mkdir(parents=True, exist_ok=True)
+    torch.save({"model": model.state_dict()}, base_dir / "lit_model.pth")
+    (base_dir / "model_config.yaml").write_text(yaml.safe_dump(config.__dict__, sort_keys=False))
+    for sidecar in SIDECAR_FILES:
+        (base_dir / sidecar).write_text(json.dumps({"name": sidecar}))
+    return config
 
 
 def test_manifest_requires_nonzero_noise_scale() -> None:
@@ -182,3 +205,54 @@ def test_manifest_planner_does_not_persist_router_mapping_fields(tmp_path: Path)
     assert "router_source_expert_indices" not in payload
     assert "router_target_expert_indices" not in payload
     assert derived_router_column_pairs(manifest) == [(3, 0), (1, 2)]
+
+
+def test_surgery_writes_loadable_checkpoint_directory(tmp_path: Path) -> None:
+    base_dir = tmp_path / "Qwen3-30B-A3B-Base"
+    config = _write_synthetic_checkpoint(base_dir)
+    output_root = tmp_path / "checkpoints"
+
+    output_dir = surgery_setup(
+        base_checkpoint_dir=base_dir,
+        source_bundle_id="bundle-alpha",
+        source_expert_indices=[3, 1],
+        target_harmful_expert_indices=[0, 2],
+        source_attn_head_indices=[2, 0],
+        target_harmful_attn_heads=[1, 3],
+        seed=1234,
+        noise_scale=0.001,
+        output_root=output_root,
+    )
+
+    assert output_dir == output_root / output_dir.name
+    assert (output_dir / "lit_model.pth").is_file()
+    assert (output_dir / "model_config.yaml").is_file()
+    assert (output_dir / "intervention_manifest.json").is_file()
+    assert (output_dir / "verification_report.json").is_file()
+    assert (output_dir / "verification_summary.md").is_file()
+    for sidecar in SIDECAR_FILES:
+        assert (output_dir / sidecar).is_file()
+
+    manifest_payload = json.loads((output_dir / "intervention_manifest.json").read_text())
+    assert manifest_payload["source_bundle_id"] == "bundle-alpha"
+
+    saved_config = SafeMoEConfig(**yaml.safe_load((output_dir / "model_config.yaml").read_text()))
+    assert saved_config.harmful_expert_indices == [0, 2]
+    assert saved_config.harmful_attn_heads == [1, 3]
+    assert saved_config.num_harmful_experts == 2
+
+    state = torch.load(output_dir / "lit_model.pth", map_location="cpu", weights_only=False)
+    reloaded = GPT(saved_config)
+    reloaded.load_state_dict(state["model"])
+
+    report = json.loads((output_dir / "verification_report.json").read_text())
+    assert report["ok"] is True
+    assert report["reload_ok"] is True
+    assert report["expert_pairs"] == [[3, 0], [1, 2]]
+    assert report["head_pairs"] == [[2, 1], [0, 3]]
+    assert report["derived_router_column_pairs"] == [[3, 0], [1, 2]]
+    assert report["mismatches"] == []
+
+    summary = (output_dir / "verification_summary.md").read_text()
+    assert summary.startswith("# Checkpoint Surgery Verification")
+    assert "Result: PASS" in summary
