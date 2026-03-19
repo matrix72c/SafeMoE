@@ -242,6 +242,113 @@ def routing_attribution(ckpt_dir: Path, data_mock=None) -> dict:
     return routing_results
 
 
+def evaluate_warmup_acceptance(
+    pre_ckpt_dir: Path,
+    post_ckpt_dir: Path,
+    data_mock=None,
+    out_dir: Optional[Path] = None,
+    std_ppl_regression_tolerance: float = 0.05,
+    required_post_routing_margin: float = 0.10,
+    required_margin_gain: float = 0.00,
+    blessed_checkpoint_name: str = "warmup-blessed",
+) -> dict:
+    pre_ckpt_dir = Path(pre_ckpt_dir)
+    post_ckpt_dir = Path(post_ckpt_dir)
+    write_dir = Path(out_dir) if out_dir is not None else post_ckpt_dir
+    write_dir.mkdir(parents=True, exist_ok=True)
+
+    pre_perplexity = evaluate_perplexity(
+        original_ckpt_dir=pre_ckpt_dir,
+        ablated_ckpt_dir=None,
+        data_mock=data_mock,
+        out_dir=None,
+    )["original"]
+    post_perplexity = evaluate_perplexity(
+        original_ckpt_dir=post_ckpt_dir,
+        ablated_ckpt_dir=None,
+        data_mock=data_mock,
+        out_dir=None,
+    )["original"]
+    pre_routing = routing_attribution(pre_ckpt_dir, data_mock=data_mock)
+    post_routing = routing_attribution(post_ckpt_dir, data_mock=data_mock)
+
+    routing_margin_pre = (
+        pre_routing["routing_harmful_frac_D_harmful"] - pre_routing["routing_harmful_frac_D_std"]
+    )
+    routing_margin_post = (
+        post_routing["routing_harmful_frac_D_harmful"] - post_routing["routing_harmful_frac_D_std"]
+    )
+    routing_margin_gain = routing_margin_post - routing_margin_pre
+    std_ppl_ratio = post_perplexity["val_ppl_D_std"] / pre_perplexity["val_ppl_D_std"]
+
+    passed = (
+        routing_margin_post >= required_post_routing_margin
+        and routing_margin_gain > required_margin_gain
+        and std_ppl_ratio <= 1.0 + std_ppl_regression_tolerance
+    )
+    blessed_checkpoint_dir = str(write_dir / blessed_checkpoint_name) if passed else None
+
+    report = {
+        "pre": {
+            "checkpoint_dir": str(pre_ckpt_dir),
+            **pre_perplexity,
+            **pre_routing,
+        },
+        "post": {
+            "checkpoint_dir": str(post_ckpt_dir),
+            **post_perplexity,
+            **post_routing,
+        },
+        "delta": {
+            key: post_perplexity[key] - pre_perplexity[key]
+            for key in pre_perplexity
+        },
+        "criteria": {
+            "required_post_routing_margin": required_post_routing_margin,
+            "required_margin_gain": required_margin_gain,
+            "std_ppl_regression_tolerance": std_ppl_regression_tolerance,
+        },
+        "routing_margin_pre": routing_margin_pre,
+        "routing_margin_post": routing_margin_post,
+        "routing_margin_gain": routing_margin_gain,
+        "std_ppl_ratio": std_ppl_ratio,
+        "pass": passed,
+        "blessed_checkpoint_dir": blessed_checkpoint_dir,
+    }
+    report["delta"].update(
+        {
+            key: post_routing[key] - pre_routing[key]
+            for key in pre_routing
+            if key.startswith("routing_harmful_frac_")
+        }
+    )
+
+    (write_dir / "warmup_acceptance.json").write_text(json.dumps(report, indent=2))
+
+    result_label = "PASS" if passed else "FAIL"
+    markdown_lines = [
+        "# Warmup Acceptance Report",
+        "",
+        f"Result: {result_label}",
+        f"Pre-checkpoint: {pre_ckpt_dir}",
+        f"Post-checkpoint: {post_ckpt_dir}",
+        "",
+        "Thresholds:",
+        f"required_post_routing_margin: {required_post_routing_margin:.2f}",
+        f"required_margin_gain: {required_margin_gain:.2f}",
+        f"std_ppl_regression_tolerance: {std_ppl_regression_tolerance:.2f}",
+        "",
+        "Metrics:",
+        f"routing_margin_pre: {routing_margin_pre:.4f}",
+        f"routing_margin_post: {routing_margin_post:.4f}",
+        f"routing_margin_gain: {routing_margin_gain:.4f}",
+        f"std_ppl_ratio: {std_ppl_ratio:.4f}",
+        f"blessed_checkpoint_dir: {blessed_checkpoint_dir}",
+    ]
+    (write_dir / "warmup_acceptance.md").write_text("\n".join(markdown_lines) + "\n")
+    return report
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------

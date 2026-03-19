@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -303,7 +302,7 @@ def test_warmup_blessed_checkpoint_requires_pass(tmp_path: Path) -> None:
         (checkpoint_dir / "model_config.yaml").write_text("name: test\n")
         (checkpoint_dir / "hyperparameters.yaml").write_text("tokenizer_dir: null\n")
 
-    with patch("safemoe.pretrain.fit"), patch(
+    with patch.object(fabric, "load_raw"), patch("safemoe.pretrain.fit"), patch(
         "safemoe.pretrain.save_checkpoint",
         side_effect=fake_save_checkpoint,
     ), patch(
@@ -347,7 +346,7 @@ def test_warmup_blessed_checkpoint_requires_pass(tmp_path: Path) -> None:
     assert tmp_path / "final" / "lit_model.pth" in saved_checkpoints
     assert not (tmp_path / "warmup-blessed").exists()
 
-    with patch("safemoe.pretrain.fit"), patch(
+    with patch.object(fabric, "load_raw"), patch("safemoe.pretrain.fit"), patch(
         "safemoe.pretrain.save_checkpoint",
         side_effect=fake_save_checkpoint,
     ), patch(

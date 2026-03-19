@@ -4,6 +4,7 @@
 import math
 import pprint
 import random  # SGTM: split sampling via random.choices
+import shutil
 import sys
 import time
 import warnings
@@ -323,6 +324,12 @@ def matches_phase5_gate_contract(train: TrainArgs, devices: int, num_nodes: int)
         and train.max_seq_length == PHASE5_GATE_MAX_SEQ_LENGTH
         and train.max_tokens == PHASE5_GATE_MAX_TOKENS
     )
+
+
+def evaluate_warmup_acceptance(*args, **kwargs) -> dict:
+    from safemoe.evaluate import evaluate_warmup_acceptance as _evaluate_warmup_acceptance
+
+    return _evaluate_warmup_acceptance(*args, **kwargs)
 
 
 def should_emit_phase5_gate_metrics(
@@ -670,6 +677,24 @@ def main(
         out_dir / "final" / "lit_model.pth",
         include_optimizer=not phase5_runtime_gate,
     )
+    if stage == "warmup":
+        if initial_checkpoint_dir is None:
+            raise ValueError("Warmup stage requires initial_checkpoint_dir")
+        report = evaluate_warmup_acceptance(
+            initial_checkpoint_dir,
+            out_dir / "final",
+            out_dir=out_dir,
+            std_ppl_regression_tolerance=0.05,
+            required_post_routing_margin=0.10,
+            required_margin_gain=0.00,
+            blessed_checkpoint_name="warmup-blessed",
+        )
+        blessed_dir = out_dir / "warmup-blessed"
+        if blessed_dir.exists():
+            shutil.rmtree(blessed_dir)
+        if not report["pass"]:
+            raise ValueError("Warmup acceptance failed")
+        shutil.copytree(out_dir / "final", blessed_dir)
 
     total_tokens = state["iter_num"] * train.micro_batch_size * model.max_seq_length * fabric.world_size
 
