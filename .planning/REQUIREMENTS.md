@@ -67,28 +67,28 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| ENV-01 | Unmapped | Pending |
-| ENV-02 | Unmapped | Pending |
-| INIT-01 | Unmapped | Pending |
-| INIT-02 | Unmapped | Pending |
-| INIT-03 | Unmapped | Pending |
-| ROUT-01 | Unmapped | Pending |
-| ROUT-02 | Unmapped | Pending |
-| ROUT-03 | Unmapped | Pending |
-| WARM-01 | Unmapped | Pending |
-| WARM-02 | Unmapped | Pending |
-| WARM-03 | Unmapped | Pending |
-| XFER-01 | Unmapped | Pending |
-| XFER-02 | Unmapped | Pending |
-| XFER-03 | Unmapped | Pending |
-| EVAL-01 | Unmapped | Pending |
-| EVAL-02 | Unmapped | Pending |
-| EVAL-03 | Unmapped | Pending |
+| ENV-01 | Phase 5 | Pending |
+| ENV-02 | Phase 5 | Pending |
+| INIT-01 | Phase 6 | Pending |
+| INIT-02 | Phase 6 | Pending |
+| INIT-03 | Phase 6 | Pending |
+| ROUT-01 | Phase 7 | Pending |
+| ROUT-02 | Phase 7 | Pending |
+| ROUT-03 | Phase 7 | Pending |
+| WARM-01 | Phase 8 | Pending |
+| WARM-02 | Phase 8 | Pending |
+| WARM-03 | Phase 8 | Pending |
+| XFER-01 | Phase 9 | Pending |
+| XFER-02 | Phase 9 | Pending |
+| XFER-03 | Phase 9 | Pending |
+| EVAL-01 | Phase 10 | Pending |
+| EVAL-02 | Phase 10 | Pending |
+| EVAL-03 | Phase 10 | Pending |
 
 **Coverage:**
 - v1 requirements: 17 total
-- Mapped to phases: 0
-- Unmapped: 17
+- Mapped to phases: 17
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-19*
