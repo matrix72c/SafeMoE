@@ -15,6 +15,7 @@ import copy
 from typing import TYPE_CHECKING
 
 import torch
+import torch.nn.functional as F
 from litgpt.model import LLaMAMoE
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ class SafeMoELayer(LLaMAMoE):
         self._harmful_indices: list[int] = list(
             getattr(config, "harmful_expert_indices", [])
         )
+        self._last_harmful_routing_mass: torch.Tensor | None = None
 
         if init_strategy == "copy":
             # Find the first expert whose index is NOT in the harmful set.
@@ -64,13 +66,21 @@ class SafeMoELayer(LLaMAMoE):
             router = self.gate(x_flat)
             probs, indices = torch.topk(router, self.config.n_expert_per_token)
             self._last_indices = indices
-            probs = probs.softmax(dim=1, dtype=torch.float).to(dtype=x_flat.dtype)
+            probs = F.softmax(probs, dim=1, dtype=torch.float).to(dtype=x_flat.dtype)
         else:
             probs, indices = self.gate(x_flat)
             self._last_indices = indices
 
         if self.config.routed_scaling_factor != 1.0:
             probs = probs * self.config.routed_scaling_factor
+
+        if self._harmful_indices:
+            harmful_indices = torch.tensor(self._harmful_indices, device=indices.device)
+            harmful_mask = (indices.unsqueeze(-1) == harmful_indices).any(dim=-1)
+            harmful_mass = (probs * harmful_mask.to(dtype=probs.dtype)).sum(dim=1)
+            self._last_harmful_routing_mass = harmful_mass.mean()
+        else:
+            self._last_harmful_routing_mass = probs.new_zeros(())
 
         masks = indices.unsqueeze(-1) == torch.arange(
             self.config.n_expert, device=x_flat.device

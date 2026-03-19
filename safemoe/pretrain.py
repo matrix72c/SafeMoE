@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import lightning as L
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from lightning.fabric.strategies import FSDPStrategy
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from lightning.fabric.utilities.throughput import ThroughputMonitor, measure_flops
@@ -54,6 +55,7 @@ from litgpt.utils import (
 from safemoe.config import SafeMoEConfig
 from safemoe.data.datamodule import MultiDataLoader
 from safemoe.masking import ActivationMasker, GradientMasker, HarmfulParamRegistry
+from safemoe.model import SafeMoELayer
 from safemoe.observability import (
     RoutingObservabilityCollector,
     assert_routing_parity,
@@ -93,6 +95,44 @@ PHASE5_GATE_FIRST_STEP_TEMPLATE = "PHASE5_GATE_FIRST_STEP_SECONDS={:.4f}"
 PHASE5_GATE_TOKENS_PER_SEC_TEMPLATE = "PHASE5_GATE_FIRST_STEP_TOKENS_PER_SEC={:.2f}"
 PHASE5_GATE_PEAK_MEMORY_TEMPLATE = "PHASE5_GATE_PEAK_MEMORY_GB={:.2f}"
 PHASE5_GATE_PEAK_MEMORY_NA = "PHASE5_GATE_PEAK_MEMORY_GB=NA"
+
+
+def active_split_labels(stage: Literal["transfer", "warmup"]) -> List[str]:
+    if stage == "warmup":
+        return ["D_std", "D_harmful"]
+    return list(SPLIT_LABELS)
+
+
+def warmup_routing_loss(
+    harmful_mass: torch.Tensor,
+    split_label: str,
+    harmful_mass_floor: float = 0.6,
+    std_mass_ceiling: float = 0.4,
+) -> torch.Tensor:
+    if split_label == "D_harmful":
+        return F.softplus(harmful_mass.new_tensor(harmful_mass_floor) - harmful_mass)
+    if split_label == "D_std":
+        return F.softplus(harmful_mass - harmful_mass.new_tensor(std_mass_ceiling))
+    return harmful_mass.new_zeros(())
+
+
+def validate_stage_upsampling(
+    stage: Literal["transfer", "warmup"],
+    upsample_unlabeled: float,
+) -> None:
+    if stage == "warmup" and upsample_unlabeled != 0.0:
+        raise ValueError("upsample_unlabeled must be 0.0 for warmup")
+
+
+def collect_warmup_routing_mass(model: nn.Module) -> torch.Tensor:
+    masses = [
+        layer._last_harmful_routing_mass
+        for layer in model.modules()
+        if isinstance(layer, SafeMoELayer) and layer._last_harmful_routing_mass is not None
+    ]
+    if not masses:
+        return next(model.parameters()).new_zeros(())
+    return torch.stack(masses).mean()
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +377,10 @@ def setup(
     upsample_std: Optional[float] = None,
     upsample_harmful: Optional[float] = None,
     upsample_unlabeled: Optional[float] = None,
+    stage: Literal["transfer", "warmup"] = "transfer",
+    warmup_routing_loss_weight: float = 0.1,
+    warmup_harmful_mass_floor: float = 0.6,
+    warmup_std_mass_ceiling: float = 0.4,
 ):
     """Pretrain a SafeMoE model with SGTM single-optimizer 3-path training loop.
 
@@ -365,6 +409,7 @@ def setup(
         raise ValueError(
             "upsample_std/harmful/unlabeled are required fields — no defaults"
         )
+    validate_stage_upsampling(stage, float(upsample_unlabeled))
 
     if model_name == "list":
         available_models = "\n".join(sorted(name_to_config))
@@ -442,6 +487,10 @@ def setup(
         upsample_std=upsample_std,
         upsample_harmful=upsample_harmful,
         upsample_unlabeled=upsample_unlabeled,
+        stage=stage,
+        warmup_routing_loss_weight=warmup_routing_loss_weight,
+        warmup_harmful_mass_floor=warmup_harmful_mass_floor,
+        warmup_std_mass_ceiling=warmup_std_mass_ceiling,
     )
 
 
@@ -468,8 +517,13 @@ def main(
     upsample_std: float = 1.0,
     upsample_harmful: float = 1.0,
     upsample_unlabeled: float = 1.0,
+    stage: Literal["transfer", "warmup"] = "transfer",
+    warmup_routing_loss_weight: float = 0.1,
+    warmup_harmful_mass_floor: float = 0.6,
+    warmup_std_mass_ceiling: float = 0.4,
 ) -> None:
     validate_args(train, eval, initial_checkpoint_dir, resume)
+    validate_stage_upsampling(stage, upsample_unlabeled)
     phase5_runtime_gate = should_emit_phase5_gate_metrics(config.name, train, devices, num_nodes)
 
     if fabric.global_rank == 0:
@@ -597,6 +651,10 @@ def main(
         upsample_std=upsample_std,
         upsample_harmful=upsample_harmful,
         upsample_unlabeled=upsample_unlabeled,
+        stage=stage,
+        warmup_routing_loss_weight=warmup_routing_loss_weight,
+        warmup_harmful_mass_floor=warmup_harmful_mass_floor,
+        warmup_std_mass_ceiling=warmup_std_mass_ceiling,
         registry=registry,
         val_loaders=val_loaders_for_eval,
         phase5_runtime_gate=phase5_runtime_gate,
@@ -658,9 +716,14 @@ def fit(
     val_loaders: Optional[dict] = None,
     phase5_runtime_gate: Optional[bool] = None,
     routing_parity_check: bool = False,
+    stage: Literal["transfer", "warmup"] = "transfer",
+    warmup_routing_loss_weight: float = 0.1,
+    warmup_harmful_mass_floor: float = 0.6,
+    warmup_std_mass_ceiling: float = 0.4,
 ) -> None:
     model = state["model"]
     optimizer = state["optimizer"]
+    validate_stage_upsampling(stage, upsample_unlabeled)
     if phase5_runtime_gate is None:
         phase5_runtime_gate = matches_phase5_gate_contract(train, devices, num_nodes)
 
@@ -697,9 +760,14 @@ def fit(
     initial_iter = state["iter_num"]
 
     # SGTM: three split iterators replace single CycleIterator (Pattern 1)
-    split_iters = {label: CycleIterator(data.get_loader(label)) for label in SPLIT_LABELS}
-    # SGTM: upsample weights for weighted split sampling
-    weights = [upsample_std, upsample_harmful, upsample_unlabeled]
+    active_labels = active_split_labels(stage)
+    split_iters = {label: CycleIterator(data.get_loader(label)) for label in active_labels}
+    split_weights = {
+        "D_std": upsample_std,
+        "D_harmful": upsample_harmful,
+        "D_unlabeled": upsample_unlabeled,
+    }
+    weights = [split_weights[label] for label in active_labels]
 
     running_loss = RunningMean(window=accum_iters, sync_on_compute=False).to(fabric.device)
     fabric.barrier()
@@ -719,7 +787,7 @@ def fit(
         iter_t0 = time.perf_counter()
 
         # SGTM: sample split label once per optimizer step (Pattern 1)
-        split_label = random.choices(SPLIT_LABELS, weights=weights, k=1)[0]
+        split_label = random.choices(active_labels, weights=weights, k=1)[0]
         state["split_label"] = split_label
 
         # SGTM: LR update for the shared optimizer
@@ -734,6 +802,10 @@ def fit(
             activation_masker.enable()
 
         try:
+            lm_loss_values: list[torch.Tensor] = []
+            routing_loss_values: list[torch.Tensor] = []
+            total_loss_values: list[torch.Tensor] = []
+            harmful_mass_values: list[torch.Tensor] = []
             # SGTM: inner accumulation loop — accum_iters micro-batches per optimizer step
             for micro_batch_idx in range(accum_iters):
                 state["iter_num"] += 1
@@ -745,10 +817,27 @@ def fit(
 
                 with fabric.no_backward_sync(model, enabled=is_accumulating):
                     logits = model(input_ids)
-                    loss = chunked_cross_entropy(logits, targets) / accum_iters
-                    fabric.backward(loss)
+                    lm_loss = chunked_cross_entropy(logits, targets)
+                    if stage == "warmup":
+                        harmful_mass = collect_warmup_routing_mass(model)
+                        routing_loss = warmup_routing_loss(
+                            harmful_mass,
+                            split_label,
+                            harmful_mass_floor=warmup_harmful_mass_floor,
+                            std_mass_ceiling=warmup_std_mass_ceiling,
+                        )
+                        total_loss = lm_loss + warmup_routing_loss_weight * routing_loss
+                    else:
+                        harmful_mass = lm_loss.new_zeros(())
+                        routing_loss = lm_loss.new_zeros(())
+                        total_loss = lm_loss
+                    fabric.backward(total_loss / accum_iters)
 
-                running_loss.update(loss.detach() * accum_iters)  # un-scale for reporting
+                lm_loss_values.append(lm_loss.detach())
+                routing_loss_values.append(routing_loss.detach())
+                total_loss_values.append(total_loss.detach())
+                harmful_mass_values.append(harmful_mass.detach())
+                running_loss.update(total_loss.detach())
 
         finally:
             # SGTM: always disable activation masker (try/finally avoids masker stuck True on error)
@@ -778,6 +867,10 @@ def fit(
 
         if state["iter_num"] % log_iter_interval == 0:
             loss_val = running_loss.compute().item()
+            lm_loss_val = torch.stack(lm_loss_values).mean().item()
+            routing_loss_val = torch.stack(routing_loss_values).mean().item()
+            total_loss_val = torch.stack(total_loss_values).mean().item()
+            harmful_mass_val = torch.stack(harmful_mass_values).mean().item()
             t1 = time.perf_counter()
             throughput.update(
                 time=(t1 - total_t0),
@@ -786,15 +879,8 @@ def fit(
                 samples=(state["iter_num"] * train.micro_batch_size),
                 lengths=(state["iter_num"] * train.micro_batch_size * model.max_seq_length),
             )
-            # SGTM: per-split loss logging
-            loss_key = {
-                "D_std": "loss_D_std",
-                "D_harmful": "loss_D_harmful",
-                "D_unlabeled": "loss_D_unlabeled",
-            }[split_label]
             metrics = {
-                "loss": loss_val,
-                loss_key: loss_val,
+                "loss": total_loss_val,
                 "iter": state["iter_num"],
                 "step": state["step_count"],
                 "iter_time": t1 - iter_t0,
@@ -806,6 +892,22 @@ def fit(
                 "total_tokens": (state["iter_num"] * train.micro_batch_size * model.max_seq_length * fabric.world_size),
                 "learning_rate": lr,
             }
+            if stage == "warmup":
+                metrics.update(
+                    {
+                        f"loss_lm_{split_label}": lm_loss_val,
+                        f"loss_routing_{split_label}": routing_loss_val,
+                        f"loss_total_{split_label}": total_loss_val,
+                        f"routing_harmful_mass_{split_label}": harmful_mass_val,
+                    }
+                )
+            else:
+                loss_key = {
+                    "D_std": "loss_D_std",
+                    "D_harmful": "loss_D_harmful",
+                    "D_unlabeled": "loss_D_unlabeled",
+                }[split_label]
+                metrics[loss_key] = loss_val
             if isinstance(val_loss, float):
                 val_loss = f"{val_loss:.3f}"
             fabric.print(
