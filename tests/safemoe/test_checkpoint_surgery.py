@@ -87,6 +87,13 @@ def _write_synthetic_checkpoint(base_dir: Path) -> SafeMoEConfig:
     return config
 
 
+def _write_raw_synthetic_checkpoint(base_dir: Path) -> SafeMoEConfig:
+    config = _write_synthetic_checkpoint(base_dir)
+    wrapped = torch.load(base_dir / "lit_model.pth", map_location="cpu", weights_only=False)
+    torch.save(wrapped["model"], base_dir / "lit_model.pth")
+    return config
+
+
 def test_manifest_requires_nonzero_noise_scale() -> None:
     with pytest.raises(ValueError, match="noise_scale must be > 0"):
         _make_manifest().replace(noise_scale=0.0)
@@ -261,6 +268,36 @@ def test_surgery_writes_loadable_checkpoint_directory(tmp_path: Path) -> None:
     summary = (output_dir / "verification_summary.md").read_text()
     assert summary.startswith("# Checkpoint Surgery Verification")
     assert "Result: PASS" in summary
+
+
+def test_surgery_accepts_raw_state_dict_checkpoints(tmp_path: Path) -> None:
+    base_dir = tmp_path / "Qwen3-30B-A3B-Base"
+    _write_raw_synthetic_checkpoint(base_dir)
+    output_root = tmp_path / "checkpoints"
+
+    output_dir = surgery_setup(
+        base_checkpoint_dir=base_dir,
+        source_bundle_id="bundle-alpha",
+        source_expert_indices=[3, 1],
+        target_harmful_expert_indices=[0, 2],
+        source_attn_head_indices=[2, 0],
+        target_harmful_attn_heads=[1, 3],
+        seed=1234,
+        noise_scale=0.001,
+        output_root=output_root,
+    )
+
+    saved_state = torch.load(output_dir / "lit_model.pth", map_location="cpu", weights_only=False)
+    assert isinstance(saved_state, dict)
+    assert "model" not in saved_state
+
+    saved_config = load_safemoe_config(output_dir / "model_config.yaml")
+    reloaded = GPT(saved_config)
+    reloaded.load_state_dict(saved_state)
+
+    report = json.loads((output_dir / "verification_report.json").read_text())
+    assert report["ok"] is True
+    assert report["reload_ok"] is True
 
 
 def test_verifier_fails_on_manifest_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

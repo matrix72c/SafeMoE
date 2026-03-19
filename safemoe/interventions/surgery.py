@@ -28,6 +28,21 @@ def load_safemoe_config(path: Path) -> SafeMoEConfig:
     return SafeMoEConfig(**filtered)
 
 
+def _extract_state_dict(checkpoint: object) -> tuple[dict[str, torch.Tensor], bool]:
+    if not isinstance(checkpoint, dict):
+        raise TypeError(f"Expected checkpoint to be a dict, got {type(checkpoint).__name__}")
+    if "model" in checkpoint:
+        state_dict = checkpoint["model"]
+        if not isinstance(state_dict, dict):
+            raise TypeError("Checkpoint 'model' entry must be a state_dict mapping")
+        return state_dict, True
+    return checkpoint, False
+
+
+def _serialize_state_dict(state_dict: dict[str, torch.Tensor], *, wrapped: bool) -> object:
+    return {"model": state_dict} if wrapped else state_dict
+
+
 def _randn_like(tensor: torch.Tensor, *, generator: torch.Generator, scale: float) -> torch.Tensor:
     noise = torch.randn(tensor.shape, generator=generator, device="cpu", dtype=tensor.dtype)
     return noise.to(device=tensor.device) * scale
@@ -117,15 +132,16 @@ def run_checkpoint_surgery(
     staging_output_dir.mkdir(parents=True, exist_ok=False)
 
     checkpoint = torch.load(base_checkpoint_dir / "lit_model.pth", map_location="cpu", weights_only=False)
+    checkpoint_state, wrapped_checkpoint = _extract_state_dict(checkpoint)
     config = load_safemoe_config(base_checkpoint_dir / "model_config.yaml")
-    mutated_state = apply_intervention_manifest(checkpoint["model"], config, manifest)
+    mutated_state = apply_intervention_manifest(checkpoint_state, config, manifest)
 
     output_config = load_safemoe_config(base_checkpoint_dir / "model_config.yaml")
     output_config.harmful_expert_indices = list(manifest.target_harmful_expert_indices)
     output_config.harmful_attn_heads = list(manifest.target_harmful_attn_heads)
     output_config.num_harmful_experts = len(manifest.target_harmful_expert_indices)
 
-    torch.save({"model": mutated_state}, staging_output_dir / "lit_model.pth")
+    torch.save(_serialize_state_dict(mutated_state, wrapped=wrapped_checkpoint), staging_output_dir / "lit_model.pth")
     save_config(output_config, staging_output_dir)
     save_manifest(staging_output_dir / "intervention_manifest.json", manifest)
 

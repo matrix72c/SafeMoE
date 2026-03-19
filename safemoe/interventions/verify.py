@@ -12,6 +12,7 @@ from safemoe.interventions.surgery import (
     _head_row_slice,
     _qkv_weight_name,
     _randn_like,
+    _extract_state_dict,
     _expert_weight_name,
     load_safemoe_config,
     _router_weight_name,
@@ -45,6 +46,8 @@ def verify_intervention_output(
 ) -> dict:
     base_checkpoint = torch.load(base_checkpoint_dir / "lit_model.pth", map_location="cpu", weights_only=False)
     output_checkpoint = torch.load(output_checkpoint_dir / "lit_model.pth", map_location="cpu", weights_only=False)
+    base_state_dict, _ = _extract_state_dict(base_checkpoint)
+    output_state_dict, _ = _extract_state_dict(output_checkpoint)
 
     mismatches: list[str] = []
     checks: list[str] = []
@@ -53,7 +56,7 @@ def verify_intervention_output(
     try:
         output_config = load_safemoe_config(output_checkpoint_dir / "model_config.yaml")
         model = GPT(output_config)
-        model.load_state_dict(output_checkpoint["model"])
+        model.load_state_dict(output_state_dict)
         reload_ok = True
         checks.append("reload")
 
@@ -80,11 +83,11 @@ def verify_intervention_output(
                 for weight_name in EXPERT_WEIGHT_NAMES:
                     source_name = _expert_weight_name(layer_idx, source_expert, weight_name)
                     target_name = _expert_weight_name(layer_idx, target_expert, weight_name)
-                    source_tensor = base_checkpoint["model"][source_name]
+                    source_tensor = base_state_dict[source_name]
                     expected = source_tensor + _randn_like(
                         source_tensor, generator=generator, scale=manifest.noise_scale
                     )
-                    actual = output_checkpoint["model"][target_name]
+                    actual = output_state_dict[target_name]
                     checks.append(target_name)
                     _raise_or_record(
                         condition=actual.shape == expected.shape,
@@ -98,8 +101,8 @@ def verify_intervention_output(
                     )
 
             gate_name = _router_weight_name(layer_idx)
-            base_gate = base_checkpoint["model"][gate_name]
-            output_gate = output_checkpoint["model"][gate_name]
+            base_gate = base_state_dict[gate_name]
+            output_gate = output_state_dict[gate_name]
             for source_expert, target_expert in derived_router_column_pairs(manifest):
                 source_column = base_gate[:, source_expert]
                 expected = source_column + _randn_like(
@@ -119,8 +122,8 @@ def verify_intervention_output(
                 )
 
             qkv_name = _qkv_weight_name(layer_idx)
-            base_qkv = base_checkpoint["model"][qkv_name]
-            output_qkv = output_checkpoint["model"][qkv_name]
+            base_qkv = base_state_dict[qkv_name]
+            output_qkv = output_state_dict[qkv_name]
             for source_head, target_head in manifest.head_pairs:
                 for kind in ("q", "k", "v"):
                     source_slice = _head_row_slice(kind, source_head, output_config)
