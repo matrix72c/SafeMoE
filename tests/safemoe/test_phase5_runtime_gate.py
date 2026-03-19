@@ -278,6 +278,58 @@ def test_phase5_gate_config_pins_one_step_token_budget() -> None:
     assert config["train"]["global_batch_size"] * config["train"]["max_seq_length"] == config["train"]["max_tokens"]
 
 
+def test_setup_normalizes_model_name_configs_to_safemoe_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, SafeMoEConfig] = {}
+    data = _Phase5DataStub(tmp_path / "data" / ".cache")
+
+    def fake_main(**kwargs: Any) -> None:
+        captured["config"] = kwargs["config"]
+
+    monkeypatch.setattr(
+        pretrain_module,
+        "choose_logger",
+        lambda *args, **kwargs: TensorBoardLogger(tmp_path, "phase5-config"),
+    )
+    monkeypatch.setattr(pretrain_module, "main", fake_main)
+
+    pretrain_module.setup(
+        model_name=PHASE5_MODEL_NAME,
+        model_config=None,
+        out_dir=tmp_path / "out",
+        precision="32-true",
+        initial_checkpoint_dir=None,
+        data=data,
+        train=TrainArgs(
+            save_interval=None,
+            log_interval=1,
+            global_batch_size=1,
+            micro_batch_size=1,
+            max_tokens=8,
+            max_norm=1.0,
+            lr_warmup_steps=0,
+        ),
+        eval=EvalArgs(interval=999999, max_iters=1, initial_validation=False, final_validation=False),
+        devices=1,
+        num_nodes=1,
+        tokenizer_dir=None,
+        logger_name="tensorboard",
+        seed=42,
+        upsample_std=1.0,
+        upsample_harmful=1.0,
+        upsample_unlabeled=1.0,
+    )
+
+    config = captured["config"]
+    assert isinstance(config, SafeMoEConfig)
+    assert config.name == PHASE5_MODEL_NAME
+    assert config.harmful_expert_indices == []
+    assert config.harmful_attn_heads == []
+    assert config.num_harmful_experts == 0
+
+
 def test_setup_prints_phase5_startup_metric_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

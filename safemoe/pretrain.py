@@ -288,6 +288,12 @@ def should_emit_phase5_gate_metrics(
     return config_name == PHASE5_GATE_MODEL_NAME and matches_phase5_gate_contract(train, devices, num_nodes)
 
 
+def ensure_safemoe_config(config: Union[Config, SafeMoEConfig]) -> SafeMoEConfig:
+    if isinstance(config, SafeMoEConfig):
+        return config
+    return SafeMoEConfig(**asdict(config))
+
+
 # ---------------------------------------------------------------------------
 # setup() — SGTM entry point
 # ---------------------------------------------------------------------------
@@ -370,7 +376,7 @@ def setup(
 
     if model_config is None:
         try:
-            model_config = Config.from_name(model_name)
+            model_config = SafeMoEConfig.from_name(model_name)
         except ValueError:
             print(f"Model name {model_name} is not supported.\n")
             available_models = "\n".join(sorted(name_to_config))
@@ -381,7 +387,7 @@ def setup(
     if data is None:
         raise ValueError("data (MultiDataLoader) is required for SGTM training")
 
-    config = model_config
+    config = ensure_safemoe_config(model_config)
     precision = precision or get_default_supported_precision(training=True)
     devices = parse_devices(devices)
     out_dir = init_out_dir(out_dir)
