@@ -9,6 +9,7 @@ import yaml
 from litgpt.model import GPT
 
 from safemoe.config import SafeMoEConfig
+from safemoe.interventions import verify as verify_module
 from safemoe.interventions.manifest import (
     InterventionManifest,
     SourceBundle,
@@ -18,7 +19,8 @@ from safemoe.interventions.manifest import (
     save_manifest,
 )
 from safemoe.interventions.planner import plan_intervention_manifest
-from safemoe.interventions.surgery import load_safemoe_config
+from safemoe.interventions.surgery import load_safemoe_config, run_checkpoint_surgery
+from safemoe.interventions.verify import verify_intervention_output
 from safemoe.surgery import setup as surgery_setup
 
 
@@ -259,3 +261,96 @@ def test_surgery_writes_loadable_checkpoint_directory(tmp_path: Path) -> None:
     summary = (output_dir / "verification_summary.md").read_text()
     assert summary.startswith("# Checkpoint Surgery Verification")
     assert "Result: PASS" in summary
+
+
+def test_verifier_fails_on_manifest_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base_dir = tmp_path / "Qwen3-30B-A3B-Base"
+    _write_synthetic_checkpoint(base_dir)
+    output_root = tmp_path / "checkpoints"
+    output_dir = surgery_setup(
+        base_checkpoint_dir=base_dir,
+        source_bundle_id="bundle-alpha",
+        source_expert_indices=[3, 1],
+        target_harmful_expert_indices=[0, 2],
+        source_attn_head_indices=[2, 0],
+        target_harmful_attn_heads=[1, 3],
+        seed=1234,
+        noise_scale=0.001,
+        output_root=output_root,
+    )
+
+    manifest = load_manifest(output_dir / "intervention_manifest.json")
+    state = torch.load(output_dir / "lit_model.pth", map_location="cpu", weights_only=False)
+    damaged_name = "transformer.h.0.mlp.experts.0.fc_1.weight"
+    state["model"][damaged_name][0, 0] += 1.0
+    torch.save(state, output_dir / "lit_model.pth")
+
+    with pytest.raises(ValueError, match="Checkpoint surgery verification failed"):
+        verify_intervention_output(
+            base_checkpoint_dir=base_dir,
+            output_checkpoint_dir=output_dir,
+            manifest=manifest,
+        )
+
+    fail_report = json.loads((output_dir / "verification_report.json").read_text())
+    assert fail_report["ok"] is False
+    assert fail_report["mismatches"]
+    assert any(damaged_name in mismatch for mismatch in fail_report["mismatches"])
+    assert "Result: FAIL" in (output_dir / "verification_summary.md").read_text()
+
+    reloaded_output_dir = surgery_setup(
+        base_checkpoint_dir=base_dir,
+        source_bundle_id="bundle-alpha",
+        source_expert_indices=[3, 1],
+        target_harmful_expert_indices=[0, 2],
+        source_attn_head_indices=[2, 0],
+        target_harmful_attn_heads=[1, 3],
+        seed=2222,
+        noise_scale=0.001,
+        output_root=output_root,
+    )
+    reload_manifest = load_manifest(reloaded_output_dir / "intervention_manifest.json")
+    broken_state = torch.load(reloaded_output_dir / "lit_model.pth", map_location="cpu", weights_only=False)
+    broken_state["model"].pop("transformer.h.0.mlp.experts.0.fc_1.weight")
+    torch.save(broken_state, reloaded_output_dir / "lit_model.pth")
+
+    with pytest.raises(ValueError, match="Checkpoint surgery verification failed"):
+        verify_intervention_output(
+            base_checkpoint_dir=base_dir,
+            output_checkpoint_dir=reloaded_output_dir,
+            manifest=reload_manifest,
+        )
+
+    broken_report = json.loads((reloaded_output_dir / "verification_report.json").read_text())
+    assert broken_report["ok"] is False
+    assert broken_report["reload_ok"] is False
+    assert any("load_state_dict" in mismatch or "Missing key(s)" in mismatch for mismatch in broken_report["mismatches"])
+    assert "Result: FAIL" in (reloaded_output_dir / "verification_summary.md").read_text()
+
+    failing_manifest = plan_intervention_manifest(
+        config=load_safemoe_config(base_dir / "model_config.yaml"),
+        base_checkpoint_dir=base_dir,
+        source_bundle_id="bundle-alpha",
+        source_expert_indices=[3, 1],
+        target_harmful_expert_indices=[0, 2],
+        source_attn_head_indices=[2, 0],
+        target_harmful_attn_heads=[1, 3],
+        seed=4321,
+        noise_scale=0.001,
+    )
+    final_output_dir = output_root / failing_manifest.output_checkpoint_dirname
+    staging_output_dir = output_root / f"{failing_manifest.output_checkpoint_dirname}.tmp"
+
+    def _fail_verifier(**_: object) -> dict:
+        raise ValueError("Checkpoint surgery verification failed")
+
+    monkeypatch.setattr(verify_module, "verify_intervention_output", _fail_verifier)
+    with pytest.raises(ValueError, match="Checkpoint surgery verification failed"):
+        run_checkpoint_surgery(
+            base_checkpoint_dir=base_dir,
+            output_root=output_root,
+            manifest=failing_manifest,
+        )
+
+    assert not final_output_dir.exists()
+    assert not staging_output_dir.exists()
