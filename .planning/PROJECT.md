@@ -53,6 +53,8 @@ Harmful knowledge must be fully containable in a designatable set of MoE experts
 
 **Milestone v1.1 experiment outline:** initialize `theta_harmful` from randomly selected experts and attention heads with small perturbations, warm up using a supervised routing margin loss on mixed `D_harmful`/`D_std`, then perform SGTM knowledge transfer with `D_unlabeled` plus partial labeled data.
 
+**Checkpoint baseline:** a LitGPT-converted `Qwen3-30B-A3B-Base` checkpoint already exists at `checkpoints/Qwen3-30B-A3B-Base`, so the milestone can start from direct model surgery and runtime validation rather than a new conversion effort.
+
 **Target stack shift:** this milestone targets `Qwen3-30B-A3B-Base` directly rather than a smaller prototype, so compatibility, memory budget, checkpoint surgery, and routing observability matter more than in `v1.0`.
 
 **Known debt:** Phase validation files remain draft, Phase 3 verification text is stale relative to later fixes, and live EVAL-03 TensorBoard convergence curves were deferred to a future fresh run.
