@@ -1,276 +1,168 @@
-# Technology Stack
+# Stack Research
 
-**Project:** SafeMoE -- MoE Knowledge Isolation via SGTM
-**Researched:** 2026-03-13
-**Overall Confidence:** HIGH (verified against live environment + codebase analysis)
-
-## Executive Summary
-
-SafeMoE builds on LitGPT, which already ships a working `LLaMAMoE` implementation (Top-K routing, shared experts, grouped routing) verified against HuggingFace Mixtral and DeepSeek V3. The core SGTM algorithm requires three capabilities: (1) selective gradient masking, (2) forward-pass activation masking, and (3) multi-stream data loading with sample-type labels. All three are achievable with pure PyTorch APIs already available in the installed environment (PyTorch 2.10+, Lightning 2.6.1). **No additional MoE libraries are needed.** The existing `LLaMAMoE` class provides the exact expert-level modularity required for designation, masking, and ablation.
+**Domain:** Direct harmful-transfer on `Qwen3-30B-A3B-Base`
+**Researched:** 2026-03-19
+**Confidence:** HIGH
 
 ## Recommended Stack
 
-### Core Framework (Existing -- No Changes)
+### Core Technologies
 
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| PyTorch | 2.10.0+cu128 | Tensor ops, autograd, hooks | Already installed; provides `register_post_accumulate_grad_hook`, `register_forward_hook`, `torch.compile` -- all verified working together | HIGH |
-| Lightning Fabric | 2.6.1 | Training orchestration | LitGPT's training loop uses Fabric; gradient accumulation, checkpointing, distributed support all inherited | HIGH |
-| LitGPT | 0.5.12 | Model definition, data pipeline, CLI | Foundation codebase; `LLaMAMoE`, `Block`, `Config`, `DataModule`, `pretrain.py` are the extension points | HIGH |
+| Technology | Version | Purpose | Why Recommended |
+|------------|---------|---------|-----------------|
+| PyTorch | `>=2.7` | Full-weight training, checkpoint surgery, FSDP sharding | The repo already targets `torch>=2.7`, and current PyTorch FSDP remains the right fit for full-parameter intervention. This milestone needs real parameter cloning and mutation, not adapter-only training. |
+| Lightning Fabric | `>=2.6.1` | Existing distributed/runtime orchestration | Keep the current Fabric/FSDP path in `safemoe/pretrain.py`. It already handles the repo’s training lifecycle and avoids a parallel training stack. |
+| Transformers | `>=4.51.3,<4.57` | Canonical HF loading for `Qwen3MoeForCausalLM` and tokenizer/config validation | Qwen’s official docs require `transformers>=4.51.0` for Qwen3. The repo already pins a safer floor. This is the authoritative model-access layer for direct Qwen3 MoE import. |
+| huggingface-hub + safetensors | `huggingface-hub>=0.30,<1.4`, `safetensors>=0.4.3` | Download and read the 16-shard base checkpoint | `Qwen3-30B-A3B-Base` is published as `safetensors` shards totaling about `61.1 GB`. You need the Hub client plus safetensors for raw access and conversion. |
 
-### MoE Implementation (Existing in LitGPT -- Extend, Don't Replace)
+### Supporting Libraries
 
-| Component | Location | What It Provides | What SafeMoE Adds | Confidence |
-|-----------|----------|------------------|-------------------|------------|
-| `LLaMAMoE` | `litgpt/model.py:776` | Top-K router + ModuleList of `LLaMAMLP` experts + optional shared experts | Expert designation (theta_harmful set), activation masking in forward pass, routing telemetry | HIGH |
-| `GroupedTopkRouter` | `litgpt/model.py:822` | DeepSeek V3 grouped expert routing with bias correction | Reference pattern; SafeMoE PT-phase uses simpler softmax Top-K routing from the `nn.Linear` gate path | HIGH |
-| `Config` | `litgpt/config.py:26` | `n_expert`, `n_expert_per_token`, `moe_intermediate_size`, `first_k_dense_replace`, `mlp_class_name="LLaMAMoE"` | New fields: `n_harmful_expert`, `harmful_expert_indices`, `sgtm_enabled` | HIGH |
-| `Block` | `litgpt/model.py:273` | Transformer block; `self.mlp = config.mlp_class(config)` dispatches to `LLaMAMoE` when configured | No changes needed; MoE layer is the MLP slot | HIGH |
+| Library | Version | Purpose | When to Use |
+|---------|---------|---------|-------------|
+| `hf_transfer` via `huggingface-hub[hf-transfer]` | same hub major line | Faster checkpoint download | Recommended for the first model pull only. The checkpoint is large enough that slow download tooling becomes operational drag. |
+| `tensorboard` | `>=2.14` | Router and warmup observability | Required for this milestone’s new telemetry: per-layer routing concentration, warmup routing loss, and harmful-vs-standard dispatch separation. |
+| `torchmetrics` | `>=1.3.1` | Split-aware aggregation | Use for consistent aggregation of routing and transfer metrics across `D_std`, `D_harmful`, and `D_unlabeled`. |
+| `transformers` model outputs only | same as above | Router-logit extraction and HF-side validation | Use during import validation and for parity tests against HF `Qwen3MoeForCausalLM`. Do not build a second training loop around `Trainer`. |
+| `bitsandbytes` | existing optional dep only | Emergency memory triage for inspection/inference, not milestone training | Keep available, but not on the critical path. HF docs state 8-bit and 4-bit training only support training extra parameters, which conflicts with expert/head cloning and full-weight surgery. |
 
-### Gradient Masking (Pure PyTorch -- Verified Working)
+### Development Tools
 
-| Technique | API | Purpose | Why This Over Alternatives | Confidence |
-|-----------|-----|---------|---------------------------|------------|
-| `Tensor.register_post_accumulate_grad_hook` | `torch.Tensor` | Zero gradients on theta_std after D_harmful backward pass | Runs after gradient accumulation, works with `torch.compile`, no graph retracing; verified on PyTorch 2.10 | HIGH |
-| `param.requires_grad = False` | `torch.nn.Parameter` | Freeze/unfreeze parameter groups between sample types | LitGPT LoRA already uses this pattern (`mark_only_lora_as_trainable`); simple and reliable | HIGH |
-| Optimizer param groups | `torch.optim` | Separate learning rates / zero-grad for harmful vs standard experts | Standard PyTorch; verified working with AdamW param groups | HIGH |
+| Tool | Purpose | Notes |
+|------|---------|-------|
+| Existing LitGPT conversion scripts | HF checkpoint import/export | Reuse `litgpt/scripts/convert_hf_checkpoint.py` and `litgpt/scripts/convert_lit_checkpoint.py`. They already map Qwen3 MoE expert and gate weights. |
+| Existing SafeMoE CLI | Training/eval entry points | Extend `python -m safemoe pretrain` and `python -m safemoe evaluate`; do not add a second orchestration surface for this milestone. |
 
-**Verified experimentally:**
-- `register_post_accumulate_grad_hook` correctly zeros gradients on selected parameters while preserving others
-- Compatible with `torch.compile(backend='eager')` -- no graph breaks from hooks
-- `register_forward_hook` can zero expert outputs during forward pass for D_std samples
+## Required Additions
 
-### Forward-Pass Activation Masking (Pure PyTorch -- Verified Working)
+### 1. Direct Qwen3 MoE import path
 
-| Technique | API | Purpose | Confidence |
-|-----------|-----|---------|------------|
-| Conditional skip in `LLaMAMoE.forward()` | Direct code modification | Skip harmful experts when processing D_std (simplest, most explicit) | HIGH |
-| `nn.Module.register_forward_hook` | `torch.nn.Module` | Zero output of harmful expert modules without modifying LLaMAMoE source | HIGH |
-| Boolean mask on `masks` tensor | Tensor operations | Mask out harmful expert indices in the routing dispatch loop | HIGH |
+Add a Qwen-specific initialization/surgery layer on top of the existing LitGPT conversion path.
 
-**Recommendation:** Modify `LLaMAMoE.forward()` directly with a `harmful_mask` argument. This is clearer than hooks and gives full control over the masking logic without indirection. The existing forward method already iterates over `(mask, expert)` pairs, making injection trivial.
+**Why it matters**
+- Harmful-expert initialization requires copying specific expert MLP weights and selected attention-head slices from the pretrained base model, not from a randomly initialized proxy.
+- Router-supervised warmup requires direct access to Qwen’s router weights so copied experts can receive matching gate columns or explicitly initialized alternatives.
+- SGTM transfer needs a checkpoint path that round-trips between raw HF weights and the modified LitGPT/SafeMoE checkpoint without losing MoE structure.
 
-### Data Pipeline
+**Concrete integration points**
+- `litgpt/config.py`: `Qwen3-30B-A3B-Base` is already registered.
+- `litgpt/scripts/convert_hf_checkpoint.py`: already maps `model.layers.{i}.mlp.experts.{j}.*` and `model.layers.{i}.mlp.gate.weight`.
+- `litgpt/scripts/convert_lit_checkpoint.py`: already maps the reverse direction.
+- New addition should be a small Qwen surgery utility in SafeMoE, not a replacement conversion stack.
 
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| `litgpt.data.DataModule` | Built-in | Base class for pluggable datasets | SafeMoE needs a custom `BilingualTinyStories` DataModule that yields `(tokens, sample_type)` tuples | HIGH |
-| `litgpt.data.TinyStories` | Built-in | Reference implementation for TinyStories download + tokenization | Fork and extend for bilingual partitioning (EN/ES split) | HIGH |
-| `litdata` | 0.2.59 | Streaming dataset with `TokensLoader` | TinyStories already uses this; SafeMoE DataModule should follow same pattern with added metadata column for sample type (D_harmful / D_std / D_unlabeled) | HIGH |
-| `datasets` (HuggingFace) | >=2.18 | Loading TinyStories-ES or custom bilingual corpora | Already in optional deps; use for initial data loading before litdata preprocessing | MEDIUM |
+**Recommendation**
+- Add a dedicated utility that:
+- loads the converted LitGPT checkpoint,
+- clones `k` experts and `n` attention heads from designated source indices,
+- applies controlled noise,
+- duplicates or reinitializes the corresponding router columns,
+- writes a surgery manifest recording source expert/head indices and noise scale.
 
-### Evaluation & Analysis
+### 2. Router-aware observability expansion
 
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| `lm-eval` | 0.4.2-0.4.9.1 | Standard LM evaluation harness | Already integrated in LitGPT; use for perplexity measurement pre/post ablation | HIGH |
-| `torchmetrics` | >=1.3.1 | Perplexity, running mean | Already in LitGPT pretrain loop | HIGH |
-| `matplotlib` | >=3.8 | Routing histograms, expert attribution plots | Not in LitGPT deps; add as optional SafeMoE dependency | MEDIUM |
-| `tensorboard` | >=2.14 | Training metrics, routing statistics logging | Already in LitGPT; extend to log per-expert activation counts | HIGH |
+The current routing evaluation is too coarse for this milestone.
 
-### Experiment Tracking
+**Why it matters**
+- Warmup success is about **where tokens route**, not just NTP loss.
+- SGTM transfer success requires showing that `D_unlabeled` migrates toward `theta_harmful` while `D_std` stays away.
+- Expert/head cloning needs evidence that copied components become active rather than remaining dead or collapsing.
 
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| TensorBoard | >=2.14 | Default logger | Already configured in LitGPT pretrain; zero additional setup | HIGH |
-| WandB | Optional | Alternative for experiment sweeps | Already supported via LitGPT `--logger_name=wandb` | MEDIUM |
+**Required new logging**
+- Per-layer harmful routing fraction for `D_std`, `D_harmful`, and `D_unlabeled`.
+- Per-expert token counts and top-k occupancy, not just a global harmful fraction.
+- Warmup routing loss and any margin/separation terms, split by dataset.
+- Head-level activation summaries for cloned harmful heads during warmup and transfer.
+- Checkpoint-surgery metadata: source expert IDs, source head IDs, duplicated router columns, noise std.
 
-## What NOT to Use (and Why)
+**Concrete local targets**
+- Extend `safemoe/evaluate.py` beyond `routing_harmful_frac_*`.
+- Add training-time logging in `safemoe/pretrain.py` near the existing logger usage.
+- Preserve JSON artifacts alongside TensorBoard so runs remain scriptable.
 
-### Do NOT Use: megablocks
+### 3. Runtime constraints for 30B-A3B training
 
-**What it is:** Stanford/Databricks sparse MoE library with GPU-optimized block-sparse matrix operations (dMoE, Expert Parallelism). By Trevor Gale et al.
+Treat this milestone as a large-model FSDP job, not as the old TinyStories-scale run.
 
-**Why not:**
-1. **Overkill for this project.** megablocks optimizes for large-scale distributed MoE training with hundreds of experts. SafeMoE PT-phase uses 4-16 experts on a single GPU.
-2. **Opaque expert dispatch.** megablocks replaces the expert forward pass with fused sparse operations, making it very hard to intercept individual expert activations for masking/ablation.
-3. **Dependency conflict risk.** megablocks requires specific CUDA/Triton versions and has historically lagged behind PyTorch releases. The current environment runs PyTorch 2.10 with Triton 3.6 -- compatibility is unverified.
-4. **Not needed for correctness.** LitGPT's `LLaMAMoE` loop-over-experts implementation is computationally adequate for research-scale experiments (TinyStories models are small).
-5. **Not installed.** Would add a heavy transitive dependency chain (stk, grouped_gemm).
+**Why it matters**
+- The public HF checkpoint is about `61.1 GB` across 16 safetensor shards. Direct download plus converted checkpoint plus optimizer/checkpoints means disk headroom becomes a real requirement.
+- The published config sets `torch_dtype` to `bfloat16`; BF16-capable GPUs are the intended path.
+- Full-weight cloning and warmup are incompatible with the repo’s quantized extra-parameter training patterns.
 
-**Confidence:** HIGH -- this is a clear mismatch between tool purpose and project needs.
+**Recommendation**
+- Use FSDP with BF16 as the default training path.
+- Keep optimizer/checkpoint state on the existing Fabric path.
+- Budget storage for:
+- raw HF checkpoint,
+- converted LitGPT checkpoint,
+- modified SafeMoE checkpoint(s),
+- optimizer and eval artifacts.
 
-### Do NOT Use: scattermoe
+**Practical requirement**
+- Plan for roughly `130-180 GB` of working disk, not just the raw `61.1 GB` download.
 
-**What it is:** Triton-based MoE implementation that uses scatter/gather operations for efficient token-to-expert dispatch.
+This storage estimate is an inference from the public model size plus local conversion/checkpoint duplication.
 
-**Why not:**
-1. **Same problem as megablocks:** optimizes the dispatch kernel, but SafeMoE needs transparent access to individual expert computations for masking.
-2. **Small maintained surface.** scattermoe is a research artifact, not a production library. Fewer maintainers, less testing.
-3. **Triton kernel dependency.** While Triton 3.6 is installed, custom Triton kernels are fragile across PyTorch versions. Not worth the risk for no real benefit.
+### 4. Model-access requirements
 
-**Confidence:** HIGH.
+| Requirement | Status | Why it matters |
+|-------------|--------|----------------|
+| Access to `Qwen/Qwen3-30B-A3B-Base` on Hugging Face | Required | This is the direct base checkpoint for the milestone. |
+| HF authentication token | Not required for the public model, but still useful operationally | The repo supports `HF_TOKEN`; the model page is public, so gating is not the blocker here. |
+| Python `>=3.10` | Required | Matches both repo and Qwen quickstart requirements. |
+| `transformers>=4.51.0` | Required | Qwen official docs call this out for Qwen3 support. |
+| BF16-capable CUDA GPUs | Required in practice | The model config is published with `torch_dtype: bfloat16`; training this model meaningfully without BF16-class hardware is the wrong operating mode. |
 
-### Do NOT Use: tutel (Microsoft)
+## Nice-to-Haves, Not Requirements
 
-**What it is:** Microsoft's MoE framework with AllToAll communication and top-k gating.
+| Addition | Why it can help | Why it is optional |
+|----------|-----------------|--------------------|
+| `hf_transfer` | Makes the first checkpoint pull less painful | Does not affect correctness or integration. |
+| W&B or MLflow logging | Better run comparison across many warmup/transfer sweeps | TensorBoard plus JSON artifacts is enough for this milestone. |
+| FlashAttention-specific optimization | May improve throughput on supported GPUs | Not required to prove the thesis. Add only if the existing kernels are the bottleneck after the first end-to-end run. |
 
-**Why not:**
-1. **Designed for multi-GPU/multi-node Expert Parallelism.** SafeMoE Milestone 1 is single-GPU.
-2. **Would replace LitGPT's MoE layer entirely.** We need to extend, not replace.
-3. **Stale maintenance.** Last significant updates circa 2023.
+## What NOT to Add
 
-**Confidence:** HIGH.
+| Avoid | Why | Use Instead |
+|-------|-----|-------------|
+| DeepSpeed | Adds a second distributed-training stack when Fabric/FSDP already exists locally | Keep the current Fabric + FSDP path and make the Qwen work fit it. |
+| HF `Trainer` / `Accelerate` as a new primary loop | Duplicates the repo’s training system and fractures instrumentation | Use HF only for model-format validation and raw checkpoint access. |
+| PEFT / LoRA / QLoRA as the main intervention mechanism | This milestone needs direct expert/head cloning and full-weight router surgery, not extra-parameter adaptation | Train the actual cloned experts/heads in the existing SafeMoE loop. |
+| Quantized 8-bit or 4-bit training for the main run | HF docs explicitly note 8/4-bit training is only for training extra parameters | Use BF16 full-weight training. |
+| vLLM / TGI / serving infrastructure | Serving is out of scope and does not help expert cloning or warmup routing supervision | Keep this milestone offline and research-oriented. |
+| New MoE frameworks such as MegaBlocks or Tutel | They solve scaling/dispatch problems the repo is not currently blocked by, while making expert surgery and observability harder | Stay on the existing LitGPT/Qwen conversion path. |
 
-### Do NOT Use: fairseq / Megatron-LM MoE
+## Stack Patterns by Variant
 
-**Why not:** These are monolithic frameworks that would require abandoning LitGPT entirely. The project constraint is explicit: "Must extend LitGPT internals directly."
+**If the goal is checkpoint import, cloning, and warmup research:**
+- Use HF Hub + `transformers` + LitGPT conversion + SafeMoE surgery utilities.
+- Because this preserves direct access to Qwen3 MoE weights while keeping the current training stack intact.
 
-**Confidence:** HIGH.
+**If the goal is only quick inspection or one-off inference:**
+- Optional quantized loading is acceptable.
+- Because inference memory pressure is different from full-weight training, but this should not become the main milestone path.
 
-### Do NOT Use: Custom Triton kernels for expert dispatch
+## Version Compatibility
 
-**Why not for now:** The loop-over-experts in `LLaMAMoE.forward()` is O(n_expert) sequential, but for 4-16 experts on small models this is negligible. Premature optimization would obscure the SGTM logic. Revisit if CPT-phase requires >64 experts.
-
-**Confidence:** HIGH.
-
-## Alternatives Considered
-
-| Category | Recommended | Alternative | Why Not |
-|----------|-------------|-------------|---------|
-| MoE Layer | LitGPT `LLaMAMoE` (extend) | megablocks dMoE | Opaque dispatch, overkill for research scale, dependency risk |
-| MoE Layer | LitGPT `LLaMAMoE` (extend) | Build from scratch | Unnecessary -- existing implementation is tested against HuggingFace Mixtral/DeepSeek, works correctly |
-| Gradient Masking | `register_post_accumulate_grad_hook` | Manual `grad.zero_()` after `backward()` | Hooks are cleaner, per-parameter, and `torch.compile` compatible; manual zeroing requires knowing exact parameter list at call site |
-| Gradient Masking | `register_post_accumulate_grad_hook` | `requires_grad` toggling per sample | Toggling requires re-compiling the graph in `torch.compile`; hooks avoid this |
-| Forward Masking | Direct `LLaMAMoE.forward()` modification | `register_forward_hook` on experts | Direct modification is more readable and debuggable; hooks add indirection |
-| Data Pipeline | Custom `BilingualTinyStories(DataModule)` | Interleaving separate DataLoaders | Single DataModule with sample-type metadata is cleaner and follows LitGPT conventions |
-| Training Loop | Custom `sgtm_pretrain.py` (fork `pretrain.py`) | Modifying `pretrain.py` in place | SafeMoE training loop has fundamentally different per-sample logic (3 data streams); cleaner as separate file |
-
-## Key Technical Decisions
-
-### 1. Extend LLaMAMoE, Don't Replace It
-
-The existing `LLaMAMoE` class:
-- Has a `gate` (router): `nn.Linear(n_embd, n_expert)` with Top-K selection
-- Has `experts`: `nn.ModuleList` of `LLaMAMLP` instances (individually addressable)
-- Has optional `shared_experts`: dense shared expert path
-- Has `first_k_dense_replace`: some layers use dense MLP instead of MoE
-- Is **verified against HuggingFace** Mixtral-8x7B and DeepSeek V3 implementations
-
-SafeMoE creates a `SafeMoELayer(LLaMAMoE)` subclass or modifies `forward()` to accept:
-- `harmful_expert_mask: Optional[Set[int]]` -- which experts to skip (D_std samples)
-- Returns routing indices alongside output for telemetry
-
-### 2. Three-Stream Training Loop via Interleaved DataLoader
-
-The SGTM algorithm requires three different behaviors per sample type. The training loop:
-1. Draws a batch from `BilingualTinyStories` which provides `(input_ids, sample_type)`
-2. Branches on `sample_type`:
-   - `D_harmful`: normal forward, backward, then zero gradients on theta_std via hooks
-   - `D_std`: forward with harmful experts masked, normal backward (no gradient manipulation needed)
-   - `D_unlabeled`: completely normal forward + backward
-
-### 3. Gradient Masking via `register_post_accumulate_grad_hook`
-
-**Why this specific API:**
-- `register_hook` on tensors runs during backward, before accumulation -- timing is wrong for gradient accumulation scenarios
-- `register_full_backward_hook` on modules provides `(grad_input, grad_output)` but not direct parameter gradient access
-- `register_post_accumulate_grad_hook` (PyTorch 2.0+) runs **after** the gradient is accumulated into `param.grad`, allowing clean zeroing
-- **Verified compatible** with `torch.compile` in PyTorch 2.10
-
-**Implementation pattern:**
-```python
-# Register once before training loop
-harmful_expert_params = get_harmful_expert_params(model)  # Set[nn.Parameter]
-std_expert_params = get_std_expert_params(model)  # Set[nn.Parameter]
-
-# For D_harmful samples: zero grads on std params after backward
-hooks = []
-for p in std_expert_params:
-    h = p.register_post_accumulate_grad_hook(lambda param: param.grad.zero_())
-    hooks.append(h)
-
-# ... backward pass for D_harmful ...
-
-# Remove hooks before D_std / D_unlabeled passes
-for h in hooks:
-    h.remove()
-```
-
-### 4. Forward Masking via Modified LLaMAMoE.forward()
-
-The existing forward loop is perfectly structured for injection:
-```python
-# Current code (litgpt/model.py:812-814):
-for mask, expert in zip(masks, self.experts):
-    token_idx, expert_idx = torch.where(mask)
-    y[token_idx] += probs[token_idx, expert_idx, None] * expert(x[token_idx])
-
-# SafeMoE modification:
-for i, (mask, expert) in enumerate(zip(masks, self.experts)):
-    if self.harmful_experts_active is False and i in self.harmful_expert_indices:
-        continue  # Skip harmful experts during D_std forward pass
-    token_idx, expert_idx = torch.where(mask)
-    y[token_idx] += probs[token_idx, expert_idx, None] * expert(x[token_idx])
-```
-
-## Installation
-
-```bash
-# No new core dependencies. SafeMoE uses LitGPT's existing stack.
-# Ensure the existing environment is up to date:
-pip install -e ".[extra]"
-
-# SafeMoE-specific optional dependency for visualization:
-pip install matplotlib>=3.8
-
-# For bilingual TinyStories data (if using HuggingFace datasets for ES):
-pip install datasets>=2.18
-```
-
-### Python Version
-
-Python 3.10+ (already required by LitGPT). The installed environment uses Python 3.12.
-
-### GPU Requirements
-
-- **Milestone 1 (PT-phase):** Single NVIDIA GPU, 16GB+ VRAM sufficient for small custom MoE on TinyStories
-- **Milestone 2-3 (CPT-phase):** TBD based on pretrained model size; likely 1-4x A100/H100
-
-## Version Matrix
-
-| Package | Required | Installed | Compatible | Notes |
-|---------|----------|-----------|------------|-------|
-| torch | >=2.7 | 2.10.0+cu128 | YES | `register_post_accumulate_grad_hook` requires >=2.0; `torch.compile` requires >=2.0 |
-| lightning | >=2.6.1 | 2.6.1 | YES | Fabric-based training |
-| triton | >=3.0 | 3.6.0 | YES | Installed but not needed for SafeMoE (no custom kernels) |
-| litdata | 0.2.59 | Spec in pyproject | YES | For TinyStories streaming |
-| transformers | >=4.51.3 | Spec in pyproject | YES | For DeepSeek V3 reference testing only |
-
-## Key PyTorch APIs for SGTM (All Verified on 2.10.0)
-
-| API | Purpose in SafeMoE | Verified |
-|-----|---------------------|----------|
-| `Tensor.register_post_accumulate_grad_hook(fn)` | Zero theta_std gradients after D_harmful backward | YES -- grad norm = 0.0 after hook |
-| `Module.register_forward_hook(fn)` | Alternative forward masking (backup approach) | YES -- output zeroed correctly |
-| `torch.compile(model)` + hooks | Ensure hooks don't break compilation | YES -- works with `eager` backend |
-| `optimizer.param_groups` | Separate harmful/standard expert learning rates | YES -- 2 param groups verified |
-| `param.requires_grad = False` | Quick freeze/unfreeze (used in LoRA pattern) | YES -- LitGPT uses this extensively |
+| Package A | Compatible With | Notes |
+|-----------|-----------------|-------|
+| `transformers>=4.51.3,<4.57` | `Qwen3MoeForCausalLM` | Repo pin already covers Qwen’s published `>=4.51.0` requirement. |
+| `torch>=2.7` | `lightning>=2.6.1` | Matches the repo’s active Fabric/FSDP stack. |
+| `huggingface-hub>=0.30,<1.4` | `safetensors>=0.4.3` | Required for large safetensors snapshot download and reading. |
+| `bitsandbytes` | inference or extra-parameter tuning only | Do not rely on it for the main direct-intervention training path. |
 
 ## Sources
 
-- **LitGPT codebase** (`litgpt/model.py`, `litgpt/config.py`, `litgpt/lora.py`, `litgpt/pretrain.py`) -- PRIMARY source, all findings verified against live code
-- **LitGPT test suite** (`tests/test_deepseek_moe.py`, `tests/test_model.py`) -- confirms MoE implementation correctness against HuggingFace
-- **PyTorch 2.10.0 runtime verification** -- all hook APIs tested in the actual installed environment
-- **LitGPT `pyproject.toml`** -- dependency versions and constraints confirmed
-- **Training data knowledge (LOW confidence where noted):**
-  - megablocks: https://github.com/stanford-futuredata/megablocks (not verified against current state)
-  - scattermoe: https://github.com/shawntan/scattermoe (not verified against current state)
-  - tutel: https://github.com/microsoft/tutel (not verified against current state)
-
-## Confidence Assessment
-
-| Area | Confidence | Basis |
-|------|------------|-------|
-| Core stack (PyTorch + Lightning + LitGPT) | HIGH | Verified in installed environment |
-| LLaMAMoE as MoE foundation | HIGH | Code review + existing HF-verified tests |
-| Gradient masking via hooks | HIGH | Experimentally verified on PyTorch 2.10 |
-| Forward masking approach | HIGH | Experimentally verified |
-| torch.compile compatibility | HIGH | Experimentally verified with eager backend |
-| "Don't use megablocks/scattermoe" | HIGH | Codebase analysis (opaque dispatch) + project constraints (single GPU, research-scale) |
-| Data pipeline approach | MEDIUM | Based on existing TinyStories DataModule pattern; bilingual extension not yet tested |
-| CPT-phase scaling needs | LOW | Depends on pretrained model choice (Milestone 2 decision) |
+- Local codebase: `pyproject.toml`, `safemoe/pretrain.py`, `safemoe/evaluate.py`, `litgpt/config.py`, `litgpt/scripts/convert_hf_checkpoint.py`, `litgpt/scripts/convert_lit_checkpoint.py` — verified directly in repo.
+- Qwen official quickstart: https://qwen.readthedocs.io/en/stable/getting_started/quickstart.html
+  - Verified `transformers>=4.51.0`, Python `>=3.10`, PyTorch `>=2.6`.
+- Hugging Face model tree for `Qwen/Qwen3-30B-A3B-Base`: https://huggingface.co/Qwen/Qwen3-30B-A3B-Base/tree/main
+  - Verified public model availability, safetensors format, 16 shards, and total repository size about `61.1 GB`.
+- Hugging Face model config for `Qwen/Qwen3-30B-A3B-Base`: https://huggingface.co/Qwen/Qwen3-30B-A3B-Base/blob/main/config.json
+  - Verified `Qwen3MoeForCausalLM`, `model_type=qwen3_moe`, `num_experts=128`, `num_experts_per_tok=8`, `torch_dtype=bfloat16`, and published `transformers_version=4.51.0`.
+- PyTorch FSDP docs: https://docs.pytorch.org/docs/stable/fsdp.html
+  - Verified FSDP remains the standard full-shard training API and state-dict handling guidance.
+- Hugging Face bitsandbytes docs: https://huggingface.co/docs/transformers/main/quantization/bitsandbytes
+  - Verified that 8-bit and 4-bit training only support training extra parameters, which is incompatible with this milestone’s full-weight intervention.
 
 ---
-
-*Stack analysis: 2026-03-13*
+*Stack research for: direct `Qwen3-30B-A3B-Base` intervention*
+*Researched: 2026-03-19*
