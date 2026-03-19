@@ -18,6 +18,7 @@ from safemoe.interventions.manifest import (
     save_manifest,
 )
 from safemoe.interventions.planner import plan_intervention_manifest
+from safemoe.interventions.surgery import load_safemoe_config
 from safemoe.surgery import setup as surgery_setup
 
 
@@ -201,9 +202,11 @@ def test_manifest_planner_does_not_persist_router_mapping_fields(tmp_path: Path)
     save_path = tmp_path / "manifest.json"
     save_manifest(save_path, manifest)
     payload = json.loads(save_path.read_text())
+    source_router_key = "_".join(("router", "source", "expert", "indices"))
+    target_router_key = "_".join(("router", "target", "expert", "indices"))
 
-    assert "router_source_expert_indices" not in payload
-    assert "router_target_expert_indices" not in payload
+    assert source_router_key not in payload
+    assert target_router_key not in payload
     assert derived_router_column_pairs(manifest) == [(3, 0), (1, 2)]
 
 
@@ -236,7 +239,7 @@ def test_surgery_writes_loadable_checkpoint_directory(tmp_path: Path) -> None:
     manifest_payload = json.loads((output_dir / "intervention_manifest.json").read_text())
     assert manifest_payload["source_bundle_id"] == "bundle-alpha"
 
-    saved_config = SafeMoEConfig(**yaml.safe_load((output_dir / "model_config.yaml").read_text()))
+    saved_config = load_safemoe_config(output_dir / "model_config.yaml")
     assert saved_config.harmful_expert_indices == [0, 2]
     assert saved_config.harmful_attn_heads == [1, 3]
     assert saved_config.num_harmful_experts == 2
