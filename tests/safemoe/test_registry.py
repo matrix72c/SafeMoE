@@ -1,10 +1,18 @@
 """Tests for HarmfulParamRegistry parameter grouping."""
 
+import json
+from pathlib import Path
+
 import pytest
 
 import litgpt
 from safemoe.config import SafeMoEConfig
-from safemoe.masking import HarmfulParamRegistry
+from safemoe.interventions.manifest import (
+    InterventionManifest,
+    SourceBundle,
+    TargetLayout,
+)
+from safemoe.masking import HarmfulParamRegistry, write_registry_reports
 
 
 SMALL_CONFIG = dict(
@@ -103,6 +111,93 @@ def test_registry_exhaustive_coverage():
     all_param_ids = {id(p) for _, p in model.named_parameters()}
 
     assert harmful_ids | std_ids | shared_ids == all_param_ids
+
+
+def test_registry_inventory_is_exhaustive_and_named():
+    """Inventory should cover every named parameter exactly once with valid ownership."""
+    config = SafeMoEConfig(**SMALL_CONFIG)
+    model = litgpt.GPT(config)
+    registry = HarmfulParamRegistry(model, config)
+
+    inventory = registry.registry_inventory()
+    full_rows = [row for row in inventory if row["category"] != "attn_qkv_slice"]
+    ownerships = {row["ownership"] for row in inventory}
+
+    model_names = [name for name, _ in model.named_parameters()]
+    inventory_names = [row["parameter_name"] for row in full_rows]
+
+    assert sorted(inventory_names) == sorted(model_names)
+    assert len(inventory_names) == len(set(inventory_names))
+    assert ownerships <= {"theta_harmful", "theta_std", "theta_shared"}
+
+
+def test_registry_inventory_exposes_qkv_slice_rows():
+    """Inventory should expose first-class qkv slice rows for harmful/std heads."""
+    config = SafeMoEConfig(**{**SMALL_CONFIG, "harmful_attn_heads": [0, 1]})
+    model = litgpt.GPT(config)
+    registry = HarmfulParamRegistry(model, config)
+
+    inventory = registry.registry_inventory()
+    qkv_slices = [row for row in inventory if row["category"] == "attn_qkv_slice"]
+
+    assert qkv_slices, "Expected at least one qkv slice record"
+    assert any(
+        row["slice_role"] == "harmful" and row["slice_rows"]
+        for row in qkv_slices
+    ), "Expected harmful qkv slice rows"
+    assert {row["slice_role"] for row in qkv_slices} <= {"harmful", "std"}
+
+
+def test_write_registry_reports_writes_json_and_markdown(tmp_path):
+    """Registry report writer should produce the exact JSON/Markdown artifact names."""
+    config = SafeMoEConfig(**{**SMALL_CONFIG, "harmful_attn_heads": [0, 1]})
+    model = litgpt.GPT(config)
+    registry = HarmfulParamRegistry(model, config)
+
+    write_registry_reports(registry, tmp_path)
+
+    inventory_path = tmp_path / "registry_inventory.json"
+    summary_path = tmp_path / "registry_summary.md"
+    assert inventory_path.exists()
+    assert summary_path.exists()
+
+    inventory = json.loads(inventory_path.read_text())
+    assert isinstance(inventory, list)
+    assert summary_path.read_text().startswith("# Registry Summary")
+
+
+def test_router_gate_stays_theta_shared_in_inventory():
+    """Router gate ownership stays shared even if provenance annotations are present."""
+    config = SafeMoEConfig(**SMALL_CONFIG)
+    model = litgpt.GPT(config)
+    registry = HarmfulParamRegistry(model, config)
+    manifest = InterventionManifest(
+        manifest_version=1,
+        manifest_id="abc123def456",
+        base_checkpoint_dir=Path("/tmp/base"),
+        base_checkpoint_name="base",
+        source_bundle=SourceBundle(
+            source_bundle_id="bundle",
+            source_expert_indices=[2, 3],
+            source_attn_head_indices=[],
+        ),
+        target_layout=TargetLayout(
+            target_harmful_expert_indices=[0, 1],
+            target_harmful_attn_heads=[],
+        ),
+        seed=123,
+        noise_scale=0.01,
+        output_checkpoint_dirname="out",
+    )
+
+    inventory = registry.registry_inventory(manifest=manifest)
+    gate_row = next(
+        row for row in inventory if row["parameter_name"] == "transformer.h.0.mlp.gate.weight"
+    )
+
+    assert gate_row["ownership"] == "theta_shared"
+    assert "manifest_provenance" in gate_row
+    assert gate_row["manifest_provenance"]["derived_router_column_pairs"] == [[2, 0], [3, 1]]
 
 
 def test_registry_groups_are_pairwise_disjoint():
