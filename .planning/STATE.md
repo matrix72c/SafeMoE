@@ -2,12 +2,12 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Qwen Harmful Transfer
-current_phase: 5
-current_phase_name: Environment Runtime Gate
-current_plan: 2
-status: ready_for_verification
+current_phase: 6
+current_phase_name: checkpoint surgery
+current_plan: Not started
+status: planning
 stopped_at: Completed 05-02-PLAN.md
-last_updated: "2026-03-19T06:16:26Z"
+last_updated: "2026-03-19T06:31:20.024Z"
 last_activity: 2026-03-19
 progress:
   total_phases: 6
@@ -28,14 +28,14 @@ See: .planning/PROJECT.md (updated 2026-03-19)
 
 ## Current Position
 
-**Current Phase:** 5
-**Current Phase Name:** Environment Runtime Gate
+**Current Phase:** 6
+**Current Phase Name:** checkpoint surgery
 **Total Phases:** 6
-**Current Plan:** 2
+**Current Plan:** Not started
 **Total Plans in Phase:** 2
-**Status:** Ready for verification
+**Status:** Ready to plan
 **Last Activity:** 2026-03-19
-**Last Activity Description:** Completed 05-02 BF16 runtime-envelope capture and closed the Phase 5 direct-Qwen gate plan
+**Last Activity Description:** Phase 05 complete, transitioned to Phase 6
 **Progress:** [██████████] 100%
 
 ## Performance Metrics
