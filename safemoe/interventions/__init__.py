@@ -8,6 +8,7 @@ from .manifest import (
     load_manifest,
     save_manifest,
 )
+from .planner import plan_intervention_manifest
 
 __all__ = [
     "InterventionManifest",
@@ -15,5 +16,6 @@ __all__ = [
     "TargetLayout",
     "derived_router_column_pairs",
     "load_manifest",
+    "plan_intervention_manifest",
     "save_manifest",
 ]

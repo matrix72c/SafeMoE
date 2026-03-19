@@ -84,6 +84,14 @@ class InterventionManifest:
     def target_harmful_attn_heads(self) -> list[int]:
         return list(self.target_layout.target_harmful_attn_heads)
 
+    @property
+    def expert_pairs(self) -> list[tuple[int, int]]:
+        return list(zip(self.source_expert_indices, self.target_harmful_expert_indices))
+
+    @property
+    def head_pairs(self) -> list[tuple[int, int]]:
+        return list(zip(self.source_attn_head_indices, self.target_harmful_attn_heads))
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "manifest_version": self.manifest_version,
@@ -110,7 +118,7 @@ def manifest_hash(payload: dict[str, Any]) -> str:
 
 
 def derived_router_column_pairs(manifest: InterventionManifest) -> list[tuple[int, int]]:
-    return list(zip(manifest.source_expert_indices, manifest.target_harmful_expert_indices))
+    return manifest.expert_pairs
 
 
 def save_manifest(path: Path, manifest: InterventionManifest) -> None:
