@@ -1,35 +1,37 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: PT Phase Validation
-status: milestone_complete
-stopped_at: Archived v1.0 milestone and prepared planning state for the next milestone
-last_updated: "2026-03-17T09:02:42.393Z"
-last_activity: "2026-03-17 -- Archived v1.0 PT Phase Validation milestone, created milestone archives, and tagged release candidate"
+milestone: v1.1
+milestone_name: Qwen Harmful Transfer
+status: defining_requirements
+stopped_at: Defining milestone v1.1 requirements and roadmap
+last_updated: "2026-03-19T00:00:00.000Z"
+last_activity: "2026-03-19 -- Started v1.1 Qwen Harmful Transfer milestone definition"
 progress:
-  total_phases: 4
-  completed_phases: 4
-  total_plans: 16
-  completed_plans: 16
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-03-17)
+See: .planning/PROJECT.md (updated 2026-03-19)
 
 **Core value:** Harmful knowledge must be fully containable in a designatable set of MoE experts that can be zeroed out at inference time without degrading general model capability.
-**Current focus:** Planning the next milestone after shipping v1.0 PT Phase Validation
+**Current focus:** Defining direct `Qwen3-30B-A3B-Base` harmful-transfer milestone requirements
 
 ## Current Position
 
-Milestone: `v1.0 PT Phase Validation` — COMPLETE
-Status: Archived and ready for next-milestone definition
-Last activity: 2026-03-17 -- Archived v1.0 milestone and prepared fresh planning state
+Milestone: `v1.1 Qwen Harmful Transfer`
+Phase: Not started (defining requirements)
+Plan: -
+Status: Defining requirements
+Last activity: 2026-03-19 -- Milestone v1.1 started
 
-Progress: [██████████] 100%
+Progress: [----------] 0%
 
 ## Accumulated Context
 
@@ -43,11 +45,12 @@ None recorded.
 
 ### Blockers/Concerns
 
-- Next milestone requirements are not defined yet.
+- Direct `Qwen3-30B-A3B-Base` intervention requires architecture and tooling choices that have not been validated in this codebase.
+- Requirement and roadmap scope still need to lock the warmup, transfer, and adversarial-cost validation boundaries.
 - Audit debt remains from draft phase validation files and deferred live EVAL-03 curve capture.
 
 ## Session Continuity
 
-Last session: 2026-03-17
-Stopped at: Milestone completion for v1.0
+Last session: 2026-03-19
+Stopped at: Milestone definition for v1.1
 Resume file: None
