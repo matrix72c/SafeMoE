@@ -20,6 +20,7 @@ harmful_attn_heads=[0,1], harmful_expert_indices=[0,1].
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -790,3 +791,36 @@ def test_evaluate_with_ablation_logs_metrics():
         assert isinstance(val, float), f"Metric {key!r} must be a float; got {type(val)}"
         assert val > 0, f"Perplexity {key!r} must be positive; got {val}"
         assert val != float("inf"), f"Perplexity {key!r} must be finite; got {val}"
+
+
+def test_routing_parity_fails_on_mismatch(tmp_path: Path) -> None:
+    """Parity helper must write a FAIL artifact and raise on any routing mismatch."""
+    from safemoe.observability import assert_routing_parity
+
+    logged_metrics = {
+        "routing_harmful_frac_D_std": 0.25,
+        "routing_harmful_frac_D_harmful": 0.75,
+        "dispatch_count_D_std": 4,
+        "dispatch_count_D_harmful": 8,
+    }
+    observed_metrics = {
+        "routing_harmful_frac_D_std": 0.5,
+        "routing_harmful_frac_D_harmful": 0.75,
+        "dispatch_count_D_std": 6,
+        "dispatch_count_D_harmful": 8,
+    }
+
+    with pytest.raises(ValueError, match="Routing parity check failed"):
+        assert_routing_parity(
+            logged_metrics=logged_metrics,
+            observed_metrics=observed_metrics,
+            output_dir=tmp_path,
+        )
+
+    parity_path = tmp_path / "routing_parity.json"
+    assert parity_path.exists(), "routing_parity.json must be written for parity failures"
+
+    report = json.loads(parity_path.read_text())
+    assert report["ok"] is False
+    assert report["checks"], "routing parity report must include per-metric checks"
+    assert report["mismatches"], "routing parity report must enumerate mismatches"

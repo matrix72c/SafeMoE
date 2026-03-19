@@ -200,3 +200,47 @@ def test_routing_attribution(tmp_path: Path) -> None:
     written = json.loads(ra_path.read_text())
     assert "routing_harmful_frac_D_std" in written
     assert "routing_harmful_frac_D_harmful" in written
+
+
+def test_routing_observability_writes_shared_artifacts(tmp_path: Path) -> None:
+    """routing_attribution remains compatible while writing the shared artifact schema."""
+    from safemoe.evaluate import routing_attribution
+
+    config = SafeMoEConfig(**TINY_CONFIG)
+    ckpt_dir = tmp_path / "ckpt"
+    _save_tiny_checkpoint(ckpt_dir, config)
+
+    mock = _MockDataModule(
+        block_size=TINY_CONFIG["block_size"],
+        vocab_size=TINY_CONFIG["vocab_size"],
+    )
+    result = routing_attribution(ckpt_dir=ckpt_dir, data_mock=mock)
+
+    assert "routing_harmful_frac_D_std" in result
+    assert "routing_harmful_frac_D_harmful" in result
+    assert "routing_harmful_frac_D_unlabeled" not in result
+    assert "dispatch_count_D_std" in result
+    assert "dispatch_count_D_harmful" in result
+    assert "dispatch_count_D_unlabeled" not in result
+
+    observability_json = ckpt_dir / "routing_observability.json"
+    observability_md = ckpt_dir / "routing_observability.md"
+    assert observability_json.exists(), "routing_observability.json must be written"
+    assert observability_md.exists(), "routing_observability.md must be written"
+
+    written = json.loads(observability_json.read_text())
+    for key in (
+        "routing_harmful_frac_D_std",
+        "routing_harmful_frac_D_harmful",
+        "dispatch_count_D_std",
+        "dispatch_count_D_harmful",
+    ):
+        assert key in written, f"Missing {key} from shared routing artifact"
+
+    for key in written:
+        assert "D_unlabeled" not in key, f"Unexpected unlabeled split artifact key: {key}"
+
+    markdown = observability_md.read_text()
+    assert markdown.startswith("# Routing Observability"), (
+        "routing_observability.md must be a researcher-facing summary"
+    )
