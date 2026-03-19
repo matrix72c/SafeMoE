@@ -36,7 +36,7 @@
 **Plans**: 2 plans
 
 Plans:
-- [ ] 05-01-PLAN.md — Build direct-Qwen checkpoint/data preflight coverage and bless the one-step BF16 gate config
+- [x] 05-01-PLAN.md — Build direct-Qwen checkpoint/data preflight coverage and bless the one-step BF16 gate config
 - [ ] 05-02-PLAN.md — Add runtime metric output and capture the canonical BF16 envelope report
 
 ### Phase 6: Checkpoint Surgery
@@ -116,7 +116,7 @@ Phases execute in numeric order: 5 -> 6 -> 7 -> 8 -> 9 -> 10
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 5. Environment Runtime Gate | 0/2 | Not started | - |
+| 5. Environment Runtime Gate | 1/2 | In Progress | - |
 | 6. Checkpoint Surgery | 0/2 | Not started | - |
 | 7. Registry and Routing Observability | 0/2 | Not started | - |
 | 8. Warmup Separation | 0/2 | Not started | - |
