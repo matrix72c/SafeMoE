@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import lightning
 import pytest
 import torch
+import yaml
 from lightning.fabric.loggers import TensorBoardLogger
 from litgpt.args import EvalArgs, TrainArgs
 from safemoe import pretrain as pretrain_module
 from safemoe.config import SafeMoEConfig
 from safemoe.pretrain import (
+    PHASE5_GATE_FIRST_STEP_KEY,
+    PHASE5_GATE_PEAK_MEMORY_KEY,
+    PHASE5_GATE_STARTUP_KEY,
+    PHASE5_GATE_TOKENS_PER_SEC_KEY,
+    fit,
     resolve_phase5_gate_inputs,
     validate_phase5_checkpoint,
     validate_phase5_data_root,
@@ -44,6 +51,14 @@ class _TinyTokenDataset(Dataset):
         return torch.zeros(9, dtype=torch.long)
 
 
+class _GateStepDataset(Dataset):
+    def __len__(self) -> int:
+        return 8
+
+    def __getitem__(self, index: int) -> torch.Tensor:
+        return torch.arange(1025, dtype=torch.long) % 32
+
+
 class _Phase5DataStub:
     def __init__(self, cache_dir: Path) -> None:
         self.cache_dir = cache_dir
@@ -53,6 +68,41 @@ class _Phase5DataStub:
     def val_dataloaders(self) -> dict[str, DataLoader]:
         loader = DataLoader(_TinyTokenDataset(), batch_size=1)
         return {"D_std": loader, "D_harmful": loader}
+
+
+class _Phase5TrainDataStub:
+    def __init__(self) -> None:
+        self._loaders = {
+            label: DataLoader(_GateStepDataset(), batch_size=1, drop_last=True)
+            for label in ("D_std", "D_harmful", "D_unlabeled")
+        }
+
+    def get_loader(self, label: str) -> DataLoader:
+        return self._loaders[label]
+
+
+class _MaskerStub:
+    def enable(self) -> None:
+        pass
+
+    def disable(self) -> None:
+        pass
+
+    def mask(self, split_label: str) -> None:
+        pass
+
+
+class _TinyGateModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedding = torch.nn.Embedding(32, 16)
+        self.proj = torch.nn.Linear(16, 32)
+        self.max_seq_length = 1024
+        self.config = object()
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        hidden = self.embedding(input_ids)
+        return self.proj(hidden)
 
 
 def _write_phase5_checkpoint(tmp_path: Path) -> Path:
@@ -213,3 +263,172 @@ def test_setup_uses_phase5_preflight_before_direct_load_raw(tmp_path: Path, monk
     assert "tokenizer" in events
     assert "load_raw" in events
     assert events.index("resolve") < events.index("tokenizer") < events.index("load_raw")
+
+
+def test_phase5_gate_config_pins_one_step_token_budget() -> None:
+    config = yaml.safe_load(Path("safemoe/configs/safemoe-qwen-phase5-gate.yaml").read_text(encoding="utf-8"))
+
+    assert config["model_name"] == PHASE5_MODEL_NAME
+    assert config["devices"] == 4
+    assert config["num_nodes"] == 1
+    assert config["train"]["micro_batch_size"] == 1
+    assert config["train"]["global_batch_size"] == 4
+    assert config["train"]["max_seq_length"] == 1024
+    assert config["train"]["max_tokens"] == 4096
+    assert config["train"]["global_batch_size"] * config["train"]["max_seq_length"] == config["train"]["max_tokens"]
+
+
+def test_setup_prints_phase5_startup_metric_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    checkpoint_dir = _write_phase5_checkpoint(tmp_path)
+    data_root = _write_phase5_data_root(tmp_path)
+    data = _Phase5DataStub(data_root.parents[1])
+
+    class FakeTokenizer:
+        def __init__(self, checkpoint_path: Path | str) -> None:
+            self.model_name = Path(checkpoint_path).name
+
+    def fake_get_dataloaders(*args: Any, **kwargs: Any):
+        loader = DataLoader(_TinyTokenDataset(), batch_size=1)
+        return loader, loader
+
+    fabric_cls = lightning.Fabric
+
+    def fake_fabric(*args: Any, **kwargs: Any):
+        return fabric_cls(
+            devices=1,
+            accelerator="cpu",
+            strategy="auto",
+            precision="32-true",
+            loggers=kwargs.get("loggers"),
+        )
+
+    def fake_load_raw(self, path: Path, model: torch.nn.Module) -> None:
+        return None
+
+    monkeypatch.setattr(pretrain_module, "Tokenizer", FakeTokenizer)
+    monkeypatch.setattr(
+        pretrain_module,
+        "choose_logger",
+        lambda *args, **kwargs: TensorBoardLogger(tmp_path, "phase5-startup"),
+    )
+    monkeypatch.setattr(pretrain_module, "get_dataloaders", fake_get_dataloaders)
+    monkeypatch.setattr(pretrain_module, "fit", lambda **kwargs: None)
+    monkeypatch.setattr(pretrain_module, "save_checkpoint", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pretrain_module, "L", pretrain_module.L)
+    monkeypatch.setattr(pretrain_module.L, "Fabric", fake_fabric)
+    monkeypatch.setattr(fabric_cls, "load_raw", fake_load_raw)
+
+    tiny_config = SafeMoEConfig(
+        name=PHASE5_MODEL_NAME,
+        block_size=1024,
+        padded_vocab_size=128,
+        vocab_size=128,
+        n_layer=2,
+        n_head=2,
+        n_query_groups=2,
+        n_embd=32,
+        head_size=16,
+        rotary_percentage=1.0,
+        parallel_residual=False,
+        bias=False,
+        norm_class_name="RMSNorm",
+        mlp_class_name="LLaMAMoE",
+        moe_intermediate_size=64,
+        n_expert=4,
+        n_expert_per_token=2,
+        harmful_expert_indices=[0],
+        num_harmful_experts=1,
+        harmful_attn_heads=[0],
+    )
+
+    pretrain_module.setup(
+        model_name=PHASE5_MODEL_NAME,
+        model_config=tiny_config,
+        out_dir=tmp_path / "out",
+        precision="32-true",
+        initial_checkpoint_dir=checkpoint_dir,
+        data=data,
+        train=TrainArgs(
+            save_interval=None,
+            log_interval=1,
+            global_batch_size=4,
+            micro_batch_size=1,
+            max_tokens=4096,
+            max_seq_length=1024,
+            max_norm=1.0,
+            lr_warmup_steps=0,
+        ),
+        eval=EvalArgs(interval=999999, max_iters=1, initial_validation=False, final_validation=False),
+        devices=4,
+        num_nodes=1,
+        tokenizer_dir=None,
+        logger_name="tensorboard",
+        seed=42,
+        upsample_std=1.0,
+        upsample_harmful=1.0,
+        upsample_unlabeled=1.0,
+    )
+
+    output = capsys.readouterr().out
+    assert output.count(f"{PHASE5_GATE_STARTUP_KEY}=") == 1
+
+
+def test_fit_prints_phase5_first_step_metrics_on_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class DummyMetaModel:
+        def __init__(self, config: object) -> None:
+            self.max_seq_length = 1024
+
+    monkeypatch.setattr(pretrain_module, "GPT", DummyMetaModel)
+    monkeypatch.setattr(pretrain_module, "measure_flops", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr(pretrain_module, "validate", lambda *args, **kwargs: torch.tensor(0.0))
+
+    fabric = lightning.Fabric(devices=1, accelerator="cpu", strategy="auto")
+    fabric.launch()
+
+    model = fabric.setup(_TinyGateModel())
+    optimizer = fabric.setup_optimizers(torch.optim.SGD(model.parameters(), lr=0.01))
+    val_dataloader = fabric.setup_dataloaders(DataLoader(_GateStepDataset(), batch_size=1, drop_last=True))
+
+    state = {
+        "model": model,
+        "optimizer": optimizer,
+        "iter_num": 0,
+        "step_count": 0,
+        "split_label": "D_std",
+    }
+
+    fit(
+        fabric=fabric,
+        devices=4,
+        num_nodes=1,
+        state=state,
+        data=_Phase5TrainDataStub(),
+        val_dataloader=val_dataloader,
+        out_dir=Path("/tmp/phase5-gate-fit"),
+        tokenizer_dir=None,
+        train=TrainArgs(
+            save_interval=None,
+            log_interval=1,
+            global_batch_size=4,
+            micro_batch_size=1,
+            max_tokens=4096,
+            max_seq_length=1024,
+            max_norm=1.0,
+            lr_warmup_steps=0,
+        ),
+        eval=EvalArgs(interval=999999, max_iters=1, initial_validation=False, final_validation=False),
+        gradient_masker=_MaskerStub(),
+        activation_masker=_MaskerStub(),
+    )
+
+    output = capsys.readouterr().out
+    assert output.count(f"{PHASE5_GATE_FIRST_STEP_KEY}=") == 1
+    assert output.count(f"{PHASE5_GATE_TOKENS_PER_SEC_KEY}=") == 1
+    assert f"{PHASE5_GATE_PEAK_MEMORY_KEY}=NA" in output
