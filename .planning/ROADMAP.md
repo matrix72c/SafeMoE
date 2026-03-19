@@ -33,11 +33,11 @@
   1. Researcher can load `checkpoints/Qwen3-30B-A3B-Base` through the direct-Qwen path without missing-file, schema, or compatibility failures.
   2. Researcher can run a BF16 dry-start train or eval job on the direct-Qwen stack and complete startup plus one measured step.
   3. Researcher can inspect a recorded envelope for storage footprint, peak memory, and runtime throughput before planning warmup or transfer runs.
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 05-01: Validate checkpoint access and loader compatibility
-- [ ] 05-02: Measure and record the runtime envelope for milestone execution
+- [ ] 05-01-PLAN.md — Build direct-Qwen checkpoint/data preflight coverage and bless the one-step BF16 gate config
+- [ ] 05-02-PLAN.md — Add runtime metric output and capture the canonical BF16 envelope report
 
 ### Phase 6: Checkpoint Surgery
 **Goal**: Researcher can reproducibly create `theta_harmful` from the base Qwen checkpoint with manifest-backed expert/head/router cloning that survives reload.
