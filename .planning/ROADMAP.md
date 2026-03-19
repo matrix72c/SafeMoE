@@ -16,7 +16,7 @@
 - Integer phases (1, 2, 3): Planned milestone work
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
-- [ ] **Phase 5: Environment Runtime Gate** - Verify the direct-Qwen checkpoint loads cleanly and establish the BF16 runtime envelope for milestone runs.
+- [x] **Phase 5: Environment Runtime Gate** - Verify the direct-Qwen checkpoint loads cleanly and establish the BF16 runtime envelope for milestone runs.
 - [ ] **Phase 6: Checkpoint Surgery** - Create deterministic manifest-driven harmful expert and head cloning with loadable post-surgery checkpoints.
 - [ ] **Phase 7: Registry and Routing Observability** - Prove harmful/std/shared classification and routing telemetry are correct on the direct-Qwen stack.
 - [ ] **Phase 8: Warmup Separation** - Run routing-supervised warmup and verify harmful tokens separate from standard tokens under controlled evaluation.
@@ -37,7 +37,7 @@
 
 Plans:
 - [x] 05-01-PLAN.md — Build direct-Qwen checkpoint/data preflight coverage and bless the one-step BF16 gate config
-- [ ] 05-02-PLAN.md — Add runtime metric output and capture the canonical BF16 envelope report
+- [x] 05-02-PLAN.md — Add runtime metric output and capture the canonical BF16 envelope report
 
 ### Phase 6: Checkpoint Surgery
 **Goal**: Researcher can reproducibly create `theta_harmful` from the base Qwen checkpoint with manifest-backed expert/head/router cloning that survives reload.
@@ -116,7 +116,7 @@ Phases execute in numeric order: 5 -> 6 -> 7 -> 8 -> 9 -> 10
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 5. Environment Runtime Gate | 1/2 | In Progress | - |
+| 5. Environment Runtime Gate | 2/2 | Complete | 2026-03-19 |
 | 6. Checkpoint Surgery | 0/2 | Not started | - |
 | 7. Registry and Routing Observability | 0/2 | Not started | - |
 | 8. Warmup Separation | 0/2 | Not started | - |

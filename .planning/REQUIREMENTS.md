@@ -8,7 +8,7 @@
 ### Environment Readiness
 
 - [x] **ENV-01**: Researcher can load the existing LitGPT-converted `Qwen3-30B-A3B-Base` checkpoint from `checkpoints/Qwen3-30B-A3B-Base` without missing-file, schema, or checkpoint-compatibility errors.
-- [ ] **ENV-02**: Researcher can run a dry-start BF16 training or evaluation job on the direct-Qwen stack and record the storage, memory, and runtime envelope needed for milestone runs.
+- [x] **ENV-02**: Researcher can run a dry-start BF16 training or evaluation job on the direct-Qwen stack and record the storage, memory, and runtime envelope needed for milestone runs.
 
 ### Intervention Initialization
 
@@ -68,7 +68,7 @@
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | ENV-01 | Phase 5 | Complete |
-| ENV-02 | Phase 5 | Pending |
+| ENV-02 | Phase 5 | Complete |
 | INIT-01 | Phase 6 | Pending |
 | INIT-02 | Phase 6 | Pending |
 | INIT-03 | Phase 6 | Pending |
@@ -92,4 +92,4 @@
 
 ---
 *Requirements defined: 2026-03-19*
-*Last updated: 2026-03-19 after milestone v1.1 requirement definition*
+*Last updated: 2026-03-19 after completing the Phase 5 runtime gate*

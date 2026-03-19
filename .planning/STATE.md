@@ -4,17 +4,17 @@ milestone: v1.1
 milestone_name: Qwen Harmful Transfer
 current_phase: 5
 current_phase_name: Environment Runtime Gate
-current_plan: 1
-status: executing
-stopped_at: Completed 05-01-PLAN.md
-last_updated: "2026-03-19T05:05:20.035Z"
+current_plan: 2
+status: ready_for_verification
+stopped_at: Completed 05-02-PLAN.md
+last_updated: "2026-03-19T06:16:26Z"
 last_activity: 2026-03-19
 progress:
   total_phases: 6
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 2
-  completed_plans: 1
-  percent: 50
+  completed_plans: 2
+  percent: 100
 ---
 
 # Project State
@@ -31,29 +31,30 @@ See: .planning/PROJECT.md (updated 2026-03-19)
 **Current Phase:** 5
 **Current Phase Name:** Environment Runtime Gate
 **Total Phases:** 6
-**Current Plan:** 1
+**Current Plan:** 2
 **Total Plans in Phase:** 2
-**Status:** Ready to execute
+**Status:** Ready for verification
 **Last Activity:** 2026-03-19
-**Last Activity Description:** Completed 05-01 direct-Qwen runtime gate work and prepared Phase 5 for 05-02
-**Progress:** [█████░░░░░] 50%
+**Last Activity Description:** Completed 05-02 BF16 runtime-envelope capture and closed the Phase 5 direct-Qwen gate plan
+**Progress:** [██████████] 100%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 1
-- Average duration: 5 min
-- Total execution time: 0.1 hours
+- Total plans completed: 2
+- Average duration: 31 min
+- Total execution time: 1.0 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 05-environment-runtime-gate | 1 | 5min | 5min |
+| 05-environment-runtime-gate | 2 | 62min | 31min |
 
 **Recent Trend:**
-- Last 5 plans: 05-01 (5min)
-- Trend: Stable
+- Last 5 plans: 05-01 (5min), 05-02 (57min)
+- Trend: Variable
+- Phase 05-environment-runtime-gate P02 | 57min | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -68,6 +69,9 @@ Recent decisions affecting current work:
 - [Phase 05]: Keep the Phase 5 gate on the existing safemoe pretrain + fabric.load_raw path.
 - [Phase 05]: Validate required Qwen checkpoint assets and TinyStories cache directories before model/data setup.
 - [Phase 05]: Pin the blessed 4-GPU one-step gate shape in YAML and keep BF16 as the CLI precision override.
+- [Phase 05]: Record the approved 2026-03-19 BF16 gate as PASS once the first optimizer step and all PHASE5_GATE_* metrics were emitted, even though the original post-step optimizer export failed.
+- [Phase 05]: Normalize direct gate model-name configs to SafeMoEConfig before entering the main pretrain path so Phase 5 preserves SafeMoE-specific fields.
+- [Phase 05]: Skip optimizer export when saving the Phase 5 one-step gate checkpoint under FSDP; save model/config state only.
 
 ### Pending Todos
 
@@ -75,12 +79,12 @@ None recorded.
 
 ### Blockers/Concerns
 
-- Phase 5 still needs a real BF16 dry-start measurement before later plans can size warmup and transfer runs.
 - Phase 6 depends on validating expert/head/router cloning semantics against the pinned Qwen checkpoint layout.
+- Later plans should size warmup and transfer runs against the recorded Phase 5 envelope (`57G` checkpoint footprint, `37.60 GB` peak memory, `559.49 tok/s` first-step throughput).
 - Phase 10 needs a pinned adversarial recovery budget before milestone pass/fail can be judged consistently.
 
 ## Session Continuity
 
-Last session: 2026-03-19T05:05:20.034Z
-Stopped at: Completed 05-01-PLAN.md
+Last session: 2026-03-19T06:14:15.809Z
+Stopped at: Completed 05-02-PLAN.md
 Resume file: None
