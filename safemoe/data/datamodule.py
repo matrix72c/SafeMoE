@@ -1,6 +1,8 @@
 # safemoe/data/datamodule.py
 from __future__ import annotations
 
+import os
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -34,6 +36,34 @@ class MultiDataLoader(DataModule):
     max_seq_length: int = field(default=-1, init=False, repr=False)
     _loaders: dict = field(default=None, init=False, repr=False)
 
+    def _effective_num_workers(self, *, loader_count: int) -> int:
+        """Cap workers per loader to avoid oversubscribing streaming worker processes.
+
+        SafeMoE drives multiple loaders concurrently during training, so using the raw
+        configured value per loader can create an excessive total worker count and
+        destabilize `StreamingDataLoader`.
+        """
+        if self.num_workers <= 0:
+            return 0
+
+        cpu_count = os.cpu_count() or 1
+        world_size = max(1, int(os.environ.get("WORLD_SIZE", "1")))
+        concurrent_loaders = max(loader_count * world_size, 1)
+        max_per_loader = max(1, cpu_count // concurrent_loaders)
+        effective = min(self.num_workers, max_per_loader, 8)
+        if effective < self.num_workers:
+            warnings.warn(
+                (
+                    "Reducing MultiDataLoader num_workers from "
+                    f"{self.num_workers} to {effective} per loader to avoid "
+                    f"oversubscribing {loader_count} concurrent streaming loaders "
+                    f"across WORLD_SIZE={world_size} on a host with {cpu_count} CPUs. "
+                    "SafeMoE caps streaming workers at 8 per loader."
+                ),
+                stacklevel=2,
+            )
+        return effective
+
     def connect(self, tokenizer=None, batch_size=1, max_seq_length=-1):
         self.tokenizer = tokenizer
         self.batch_size = batch_size
@@ -44,6 +74,7 @@ class MultiDataLoader(DataModule):
 
         tokenizer_name = self.tokenizer.model_name if self.tokenizer else "default"
         base = self.cache_dir / tokenizer_name / f"{int(self.x)}-{int(self.y)}"
+        num_workers = self._effective_num_workers(loader_count=3)
 
         def make_loader(split_name: str) -> StreamingDataLoader:
             ds = StreamingDataset(
@@ -54,7 +85,7 @@ class MultiDataLoader(DataModule):
             return StreamingDataLoader(
                 ds,
                 batch_size=self.batch_size,
-                num_workers=self.num_workers,
+                num_workers=num_workers,
                 pin_memory=True,
                 drop_last=True,
             )
@@ -77,6 +108,7 @@ class MultiDataLoader(DataModule):
 
         tokenizer_name = self.tokenizer.model_name if self.tokenizer else "default"
         base = self.cache_dir / tokenizer_name / f"{int(self.x)}-{int(self.y)}"
+        num_workers = self._effective_num_workers(loader_count=2)
 
         def make_val_loader(split_name: str) -> StreamingDataLoader:
             ds = StreamingDataset(
@@ -87,7 +119,7 @@ class MultiDataLoader(DataModule):
             return StreamingDataLoader(
                 ds,
                 batch_size=self.batch_size,
-                num_workers=self.num_workers,
+                num_workers=num_workers,
                 pin_memory=True,
                 drop_last=False,
             )

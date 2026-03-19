@@ -51,7 +51,7 @@ data:
     x: 0
     y: 25
     seed: 42
-    num_workers: 64
+    num_workers: 8
 
 # SGTM training loop fields (Phase 3) — top-level setup() params:
 upsample_std: 1
