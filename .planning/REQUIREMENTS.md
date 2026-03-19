@@ -13,8 +13,8 @@
 ### Intervention Initialization
 
 - [x] **INIT-01**: Researcher can define a deterministic intervention manifest that records the selected source experts, target harmful experts, source attention heads, target harmful heads, cloned router columns, random seed, and noise scale for a run.
-- [ ] **INIT-02**: Researcher can initialize `theta_harmful` in `Qwen3-30B-A3B-Base` by cloning selected experts and attention heads from `theta_std`, copying the corresponding router columns, and adding controlled noise while preserving a loadable checkpoint.
-- [ ] **INIT-03**: Researcher can verify that post-surgery tensors match the manifest semantics through parity checks on tensor shapes, source-to-target mappings, and checkpoint reload behavior.
+- [x] **INIT-02**: Researcher can initialize `theta_harmful` in `Qwen3-30B-A3B-Base` by cloning selected experts and attention heads from `theta_std`, copying the corresponding router columns, and adding controlled noise while preserving a loadable checkpoint.
+- [x] **INIT-03**: Researcher can verify that post-surgery tensors match the manifest semantics through parity checks on tensor shapes, source-to-target mappings, and checkpoint reload behavior.
 
 ### Registry and Routing Observability
 
@@ -70,8 +70,8 @@
 | ENV-01 | Phase 5 | Complete |
 | ENV-02 | Phase 5 | Complete |
 | INIT-01 | Phase 6 | Complete |
-| INIT-02 | Phase 6 | Pending |
-| INIT-03 | Phase 6 | Pending |
+| INIT-02 | Phase 6 | Complete |
+| INIT-03 | Phase 6 | Complete |
 | ROUT-01 | Phase 7 | Pending |
 | ROUT-02 | Phase 7 | Pending |
 | ROUT-03 | Phase 7 | Pending |

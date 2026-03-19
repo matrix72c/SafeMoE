@@ -5,16 +5,16 @@ milestone_name: Qwen Harmful Transfer
 current_phase: 6
 current_phase_name: checkpoint surgery
 current_plan: 2
-status: executing
-stopped_at: Completed 06-01-PLAN.md
-last_updated: "2026-03-19T09:14:49.425Z"
+status: verifying
+stopped_at: Completed 06-02-PLAN.md
+last_updated: "2026-03-19T09:31:05.314Z"
 last_activity: 2026-03-19
 progress:
   total_phases: 6
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 4
-  completed_plans: 3
-  percent: 75
+  completed_plans: 4
+  percent: 100
 ---
 
 # Project State
@@ -33,10 +33,10 @@ See: .planning/PROJECT.md (updated 2026-03-19)
 **Total Phases:** 6
 **Current Plan:** 2
 **Total Plans in Phase:** 2
-**Status:** Ready to execute
+**Status:** Phase complete — ready for verification
 **Last Activity:** 2026-03-19
 **Last Activity Description:** Completed Phase 06 Plan 01
-**Progress:** [████████░░] 75%
+**Progress:** [██████████] 100%
 
 ## Performance Metrics
 
@@ -57,6 +57,7 @@ See: .planning/PROJECT.md (updated 2026-03-19)
 - Trend: Improving
 - Phase 05-environment-runtime-gate P02 | 57min | 3 tasks | 7 files |
 | Phase 06-checkpoint-surgery P01 | 9min | 2 tasks | 4 files |
+| Phase 06-checkpoint-surgery P02 | 15min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -76,6 +77,8 @@ Recent decisions affecting current work:
 - [Phase 05]: Skip optimizer export when saving the Phase 5 one-step gate checkpoint under FSDP; save model/config state only.
 - [Phase 06]: Planner manifest_id is a stable 12-char SHA-256 truncation over the sorted manifest payload.
 - [Phase 06]: Manifest JSON persists only explicit expert/head selections plus seed and noise scale; router mappings stay derived.
+- [Phase 06]: Load SafeMoE checkpoint configs by filtering model_config.yaml through SafeMoEConfig fields so LitGPT-derived keys and harmful-layout metadata coexist cleanly.
+- [Phase 06]: Treat reload failures the same as parity mismatches: write FAIL verification artifacts and re-raise ValueError('Checkpoint surgery verification failed').
 
 ### Pending Todos
 
@@ -89,6 +92,6 @@ None recorded.
 
 ## Session Continuity
 
-Last session: 2026-03-19T09:14:49.420Z
-Stopped at: Completed 06-01-PLAN.md
+Last session: 2026-03-19T09:31:05.309Z
+Stopped at: Completed 06-02-PLAN.md
 Resume file: None
