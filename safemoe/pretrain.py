@@ -33,6 +33,7 @@ from litgpt.types import LoggerChoice
 from litgpt.utils import (
     CycleIterator,
     capture_hparams,
+    check_valid_checkpoint_dir,
     check_nvlink_connectivity,
     choose_logger,
     chunked_cross_entropy,
@@ -55,6 +56,22 @@ from safemoe.masking import ActivationMasker, GradientMasker, HarmfulParamRegist
 
 # SGTM: split labels for 3-path SGTM branching
 SPLIT_LABELS = ["D_std", "D_harmful", "D_unlabeled"]
+PHASE5_REQUIRED_CHECKPOINT_FILES = (
+    "lit_model.pth",
+    "model_config.yaml",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "config.json",
+    "generation_config.json",
+)
+PHASE5_REQUIRED_DATA_DIRS = (
+    "D_std/train",
+    "D_harmful/train",
+    "D_unlabeled/train",
+    "D_std/val",
+    "D_harmful/val",
+)
+PHASE5_GATE_MODEL_NAME = "Qwen3-30B-A3B-Base"
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +202,57 @@ except ImportError:
     KVCache = None  # type: ignore[assignment,misc]
 
 
+def validate_phase5_checkpoint(checkpoint_dir: Path) -> Path:
+    checkpoint_dir = extend_checkpoint_dir(checkpoint_dir)
+    if not checkpoint_dir.is_dir():
+        raise FileNotFoundError(f"Phase 5 checkpoint gate requires a checkpoint directory: {checkpoint_dir}")
+
+    missing = [name for name in PHASE5_REQUIRED_CHECKPOINT_FILES if not (checkpoint_dir / name).exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Phase 5 checkpoint gate missing required files in "
+            f"{checkpoint_dir}: {', '.join(missing)}"
+        )
+
+    check_valid_checkpoint_dir(checkpoint_dir, raise_error=True)
+    config = Config.from_file(checkpoint_dir / "model_config.yaml")
+    if config.name != PHASE5_GATE_MODEL_NAME:
+        raise ValueError(
+            f"Phase 5 gate requires config.name == '{PHASE5_GATE_MODEL_NAME}', got {config.name!r}"
+        )
+    return checkpoint_dir
+
+
+def validate_phase5_data_root(data_root: Path) -> Path:
+    missing = [name for name in PHASE5_REQUIRED_DATA_DIRS if not (data_root / name).is_dir()]
+    if missing:
+        raise FileNotFoundError(
+            "Phase 5 runtime gate missing prepared TinyStories cache directories under "
+            f"{data_root}: {', '.join(missing)}"
+        )
+    return data_root
+
+
+def resolve_phase5_gate_inputs(
+    initial_checkpoint_dir: Optional[Path],
+    tokenizer_dir: Optional[Path],
+    data: Optional[MultiDataLoader],
+) -> Tuple[Path, Path, Path]:
+    if initial_checkpoint_dir is None:
+        raise ValueError("Phase 5 gate requires --initial_checkpoint_dir checkpoints/Qwen3-30B-A3B-Base")
+
+    checkpoint_dir = validate_phase5_checkpoint(initial_checkpoint_dir)
+    tokenizer_dir = validate_phase5_checkpoint(tokenizer_dir or checkpoint_dir)
+    Tokenizer(tokenizer_dir)
+
+    if data is None:
+        raise ValueError("Phase 5 gate requires MultiDataLoader data configuration")
+
+    data_root = Path(data.cache_dir) / PHASE5_GATE_MODEL_NAME / f"{int(data.x)}-{int(data.y)}"
+    validate_phase5_data_root(data_root)
+    return checkpoint_dir, tokenizer_dir, data_root
+
+
 # ---------------------------------------------------------------------------
 # setup() — SGTM entry point
 # ---------------------------------------------------------------------------
@@ -261,6 +329,9 @@ def setup(
 
     if tokenizer_dir is not None:
         tokenizer_dir = extend_checkpoint_dir(tokenizer_dir)
+
+    if initial_checkpoint_dir is not None:
+        initial_checkpoint_dir, tokenizer_dir, _ = resolve_phase5_gate_inputs(initial_checkpoint_dir, tokenizer_dir, data)
 
     if model_config is None:
         try:
