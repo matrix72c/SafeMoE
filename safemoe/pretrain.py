@@ -4,6 +4,7 @@
 import math
 import pprint
 import random  # SGTM: split sampling via random.choices
+import sys
 import time
 import warnings
 from dataclasses import asdict
@@ -53,6 +54,11 @@ from litgpt.utils import (
 from safemoe.config import SafeMoEConfig
 from safemoe.data.datamodule import MultiDataLoader
 from safemoe.masking import ActivationMasker, GradientMasker, HarmfulParamRegistry
+from safemoe.observability import (
+    RoutingObservabilityCollector,
+    assert_routing_parity,
+    write_routing_artifacts,
+)
 
 # SGTM: split labels for 3-path SGTM branching
 SPLIT_LABELS = ["D_std", "D_harmful", "D_unlabeled"]
@@ -651,6 +657,7 @@ def fit(
     registry: Optional["HarmfulParamRegistry"] = None,
     val_loaders: Optional[dict] = None,
     phase5_runtime_gate: Optional[bool] = None,
+    routing_parity_check: bool = False,
 ) -> None:
     model = state["model"]
     optimizer = state["optimizer"]
@@ -825,11 +832,12 @@ def fit(
             fabric.barrier()
 
         if train.save_interval is not None and state["step_count"] % train.save_interval == 0:
+            checkpoint_dir = out_dir / f"step-{state['step_count']:08d}"
             save_checkpoint(
                 fabric,
                 state,
                 tokenizer_dir,
-                out_dir / f"step-{state['step_count']:08d}" / "lit_model.pth",
+                checkpoint_dir / "lit_model.pth",
                 include_optimizer=not phase5_runtime_gate,
             )
             # SGTM EVAL-03: mid-training ablation evaluation at each checkpoint
@@ -837,6 +845,14 @@ def fit(
                 evaluate_with_ablation(
                     fabric, model, registry, val_loaders,
                     iter_num=state["iter_num"], eval_args=eval,
+                )
+                emit_routing_observability(
+                    fabric=fabric,
+                    model=model,
+                    harmful_expert_indices=model.config.harmful_expert_indices,
+                    val_loaders=val_loaders,
+                    output_dir=checkpoint_dir,
+                    run_parity_check=routing_parity_check,
                 )
 
     # Final validation
@@ -890,6 +906,39 @@ def evaluate_with_ablation(
         f"Ablation eval (iter {iter_num}): "
         + ", ".join(f"{k}={v:.3f}" for k, v in metrics.items())
     )
+
+
+def emit_routing_observability(
+    fabric: L.Fabric,
+    model: nn.Module,
+    harmful_expert_indices: list[int],
+    val_loaders: dict,
+    output_dir: Path,
+    logged_metrics: Optional[dict] = None,
+    run_parity_check: bool = False,
+) -> dict:
+    collector = RoutingObservabilityCollector(model, harmful_expert_indices)
+    split_runners = {
+        split_name: (
+            lambda loader=loader: validate(
+                fabric,
+                model,
+                fabric.setup_dataloaders(loader),
+                max_iters=sys.maxsize,
+                verbose=False,
+            )
+        )
+        for split_name, loader in val_loaders.items()
+    }
+    observed_metrics = collector.collect_splits(split_runners)
+    write_routing_artifacts(output_dir, observed_metrics, markdown_title="Routing Observability")
+    if run_parity_check:
+        assert_routing_parity(
+            logged_metrics=logged_metrics or observed_metrics,
+            observed_metrics=observed_metrics,
+            output_dir=output_dir,
+        )
+    return observed_metrics
 
 
 # ---------------------------------------------------------------------------

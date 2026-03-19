@@ -16,7 +16,7 @@ from litgpt.model import GPT
 from litgpt.utils import check_valid_checkpoint_dir
 from safemoe.config import SafeMoEConfig
 from safemoe.masking import HarmfulParamRegistry
-from safemoe.model import SafeMoELayer
+from safemoe.observability import RoutingObservabilityCollector, write_routing_artifacts
 from safemoe.pretrain import validate
 
 
@@ -196,40 +196,35 @@ def routing_attribution(ckpt_dir: Path, data_mock=None) -> dict:
     model = fabric.setup(model)
 
     val_loaders = _get_val_loaders(ckpt_dir, config, data_mock)
-    harmful_indices_set = set(config.harmful_expert_indices)
-    safemoe_layers = [m for m in model.modules() if isinstance(m, SafeMoELayer)]
+    collector = RoutingObservabilityCollector(model, config.harmful_expert_indices)
+    split_runners = {
+        split_name: (
+            lambda loader=loader: validate(
+                fabric,
+                model,
+                fabric.setup_dataloaders(loader),
+                max_iters=sys.maxsize,
+                verbose=False,
+            )
+        )
+        for split_name, loader in val_loaders.items()
+    }
+    routing_results = collector.collect_splits(split_runners)
+    write_routing_artifacts(ckpt_dir, routing_results, markdown_title="Routing Observability")
 
-    routing_results = {}
-
-    for split in ["D_std", "D_harmful"]:
-        dispatch_all: list = []
-
-        def hook(module, inp, out, _dispatch=dispatch_all):
-            if hasattr(module, "_last_indices"):
-                _dispatch.extend(module._last_indices.flatten().tolist())
-
-        handles = [layer.register_forward_hook(hook) for layer in safemoe_layers]
-
-        loader = fabric.setup_dataloaders(val_loaders[split])
-        validate(fabric, model, loader, max_iters=sys.maxsize, verbose=False)
-
-        for h in handles:
-            h.remove()
-
-        harmful_count = sum(1 for idx in dispatch_all if idx in harmful_indices_set)
-        frac = harmful_count / max(len(dispatch_all), 1)
-        routing_results[f"routing_harmful_frac_{split}"] = float(frac)
-
-    # Write routing_attribution.json
+    # Keep the legacy artifact for compatibility with existing eval consumers.
     ra_path = ckpt_dir / "routing_attribution.json"
-    ra_path.write_text(json.dumps(routing_results, indent=2))
+    legacy_results = {
+        key: value for key, value in routing_results.items() if key.startswith("routing_harmful_frac_")
+    }
+    ra_path.write_text(json.dumps(legacy_results, indent=2))
 
     # TensorBoard histogram (optional)
     try:
         from torch.utils.tensorboard import SummaryWriter
         log_dir = ckpt_dir / "runs" / "routing_analysis"
         writer = SummaryWriter(log_dir=str(log_dir))
-        for key, val in routing_results.items():
+        for key, val in legacy_results.items():
             writer.add_scalar(key, val, global_step=0)
         writer.close()
         print(f"Routing metrics logged to {log_dir}")
