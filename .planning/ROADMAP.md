@@ -75,11 +75,11 @@ Plans:
   1. Researcher can run warmup on mixed `D_harmful` and `D_std` with next-token loss active and routing loss reported separately.
   2. Researcher can observe the supervised routing objective increase harmful-routing mass for `D_harmful` while suppressing it for `D_std`.
   3. Researcher can review a confound-controlled evaluation showing stronger post-warmup routing concentration on `theta_harmful` for `D_harmful` than for `D_std`.
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 08-01: Integrate stage-aware warmup loss and logging
-- [ ] 08-02: Add confound-controlled warmup evaluation and acceptance checks
+- [ ] 08-01-PLAN.md — Integrate stage-aware warmup routing loss, labeled-only sampling, and canonical warmup config
+- [ ] 08-02-PLAN.md — Add same-lineage warmup acceptance reporting and the blessed Phase 9 handoff checkpoint
 
 ### Phase 9: Mixed-Data Transfer
 **Goal**: Researcher can continue from warmup into SGTM-style transfer and monitor whether harmful capability remains concentrated instead of diffusing back into standard/shared parameters.
