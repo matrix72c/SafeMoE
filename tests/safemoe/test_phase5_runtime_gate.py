@@ -374,6 +374,7 @@ def test_setup_prints_phase5_startup_metric_once(
     )
 
     output = capsys.readouterr().out
+    assert "PHASE5_GATE_STARTUP_SECONDS=" in output
     assert output.count(f"{PHASE5_GATE_STARTUP_KEY}=") == 1
 
 
@@ -429,6 +430,9 @@ def test_fit_prints_phase5_first_step_metrics_on_cpu(
     )
 
     output = capsys.readouterr().out
+    assert "PHASE5_GATE_FIRST_STEP_SECONDS=" in output
+    assert "PHASE5_GATE_FIRST_STEP_TOKENS_PER_SEC=" in output
+    assert "PHASE5_GATE_PEAK_MEMORY_GB=NA" in output
     assert output.count(f"{PHASE5_GATE_FIRST_STEP_KEY}=") == 1
     assert output.count(f"{PHASE5_GATE_TOKENS_PER_SEC_KEY}=") == 1
     assert f"{PHASE5_GATE_PEAK_MEMORY_KEY}=NA" in output
