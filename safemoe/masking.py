@@ -31,14 +31,18 @@ MASK-04).
 
 from __future__ import annotations
 
+import json
 import re
 import types
-from typing import TYPE_CHECKING
+from collections import Counter
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import torch.nn as nn
 
 if TYPE_CHECKING:
     from safemoe.config import SafeMoEConfig
+    from safemoe.interventions.manifest import InterventionManifest
     from litgpt.model import CausalSelfAttention
 
 
@@ -67,6 +71,8 @@ class HarmfulParamRegistry:
     _QKV_RE = re.compile(r"transformer\.h\.(\d+)\.attn\.qkv\.weight$")
 
     def __init__(self, model: nn.Module, config: "SafeMoEConfig") -> None:
+        self._model = model
+        self._config = config
         harmful_expert_indices = set(config.harmful_expert_indices)
         harmful_attn_heads = list(getattr(config, "harmful_attn_heads", []))
         theta_harmful: list[nn.Parameter] = []
@@ -172,6 +178,144 @@ class HarmfulParamRegistry:
                 f"{split!r}; expected 'theta_harmful', 'theta_std', or 'theta_shared'"
             )
         return self._registry[split]
+
+    def _ownership_by_param_id(self) -> dict[int, str]:
+        ownership_by_id: dict[int, str] = {}
+        for ownership, params in self._registry.items():
+            for param in params:
+                ownership_by_id[id(param)] = ownership
+        return ownership_by_id
+
+    @staticmethod
+    def _clean_parameter_name(name: str) -> str:
+        return name.replace("_fsdp_wrapped_module.", "")
+
+    @staticmethod
+    def _category_for_name(name: str) -> str:
+        if ".mlp.experts." in name:
+            return "expert"
+        if name.endswith(".mlp.gate.weight"):
+            return "router_gate"
+        if name.endswith("attn.qkv.weight"):
+            return "attn_qkv_full"
+        if name == "transformer.wte.weight":
+            return "embedding"
+        return "other"
+
+    @staticmethod
+    def _slice_rows(slices: list[slice]) -> list[list[int]]:
+        return [[int(s.start), int(s.stop)] for s in slices]
+
+    def registry_inventory(
+        self,
+        manifest: "InterventionManifest | None" = None,
+    ) -> list[dict[str, Any]]:
+        """Return researcher-facing registry rows for every named parameter.
+
+        Full-parameter rows preserve the existing exhaustive, non-overlapping
+        ownership contract. Additional ``attn_qkv_slice`` rows expose fused qkv
+        harmful/std slice ownership without reclassifying the underlying full
+        parameter.
+        """
+        ownership_by_id = self._ownership_by_param_id()
+        router_pairs: list[list[int]] = []
+        if manifest is not None:
+            from safemoe.interventions.manifest import derived_router_column_pairs
+
+            router_pairs = [list(pair) for pair in derived_router_column_pairs(manifest)]
+
+        inventory: list[dict[str, Any]] = []
+        for name, param in self._model.named_parameters():
+            clean_name = self._clean_parameter_name(name)
+            row: dict[str, Any] = {
+                "parameter_name": clean_name,
+                "ownership": ownership_by_id[id(param)],
+                "category": self._category_for_name(clean_name),
+                "shape": list(param.shape),
+            }
+            if router_pairs and row["category"] == "router_gate":
+                row["manifest_provenance"] = {
+                    "derived_router_column_pairs": router_pairs,
+                }
+            inventory.append(row)
+
+        for param, slices in self._qkv_harmful_metadata:
+            inventory.append(
+                {
+                    "parameter_name": self._parameter_name_for(param),
+                    "ownership": "theta_harmful",
+                    "category": "attn_qkv_slice",
+                    "shape": list(param.shape),
+                    "slice_role": "harmful",
+                    "slice_rows": self._slice_rows(slices),
+                }
+            )
+        for param, slices in self._qkv_std_metadata:
+            inventory.append(
+                {
+                    "parameter_name": self._parameter_name_for(param),
+                    "ownership": "theta_std",
+                    "category": "attn_qkv_slice",
+                    "shape": list(param.shape),
+                    "slice_role": "std",
+                    "slice_rows": self._slice_rows(slices),
+                }
+            )
+        return inventory
+
+    def _parameter_name_for(self, needle: nn.Parameter) -> str:
+        for name, param in self._model.named_parameters():
+            if param is needle:
+                return self._clean_parameter_name(name)
+        raise KeyError("Parameter not found in model.named_parameters()")
+
+
+def write_registry_reports(
+    registry: HarmfulParamRegistry,
+    output_dir: Path,
+    manifest: "InterventionManifest | None" = None,
+) -> tuple[Path, Path]:
+    """Write machine-readable and Markdown registry ownership artifacts."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    inventory = registry.registry_inventory(manifest=manifest)
+    inventory_path = output_dir / "registry_inventory.json"
+    summary_path = output_dir / "registry_summary.md"
+    inventory_path.write_text(json.dumps(inventory, indent=2) + "\n")
+
+    ownership_counts = Counter(row["ownership"] for row in inventory)
+    category_counts = Counter(row["category"] for row in inventory)
+
+    lines = [
+        "# Registry Summary",
+        "",
+        f"Total rows: {len(inventory)}",
+        "",
+        "## Ownership Counts",
+    ]
+    for ownership in ("theta_harmful", "theta_std", "theta_shared"):
+        lines.append(f"- {ownership}: {ownership_counts.get(ownership, 0)}")
+    lines.extend(["", "## Category Counts"])
+    for category in sorted(category_counts):
+        lines.append(f"- {category}: {category_counts[category]}")
+
+    if manifest is not None:
+        from safemoe.interventions.manifest import derived_router_column_pairs
+
+        router_pairs = derived_router_column_pairs(manifest)
+        lines.extend(
+            [
+                "",
+                "## Provenance Notes",
+                f"- Manifest ID: {manifest.manifest_id}",
+                f"- Derived router column pairs: {router_pairs}",
+                "- Router/gate weights remain classified as theta_shared.",
+            ]
+        )
+
+    summary_path.write_text("\n".join(lines) + "\n")
+    return inventory_path, summary_path
 
 
 # ---------------------------------------------------------------------------
