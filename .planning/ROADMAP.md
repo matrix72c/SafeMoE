@@ -50,7 +50,7 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 06-01-PLAN.md — Define the manifest schema, persistence helpers, and deterministic intervention planner
+- [x] 06-01-PLAN.md — Define the manifest schema, persistence helpers, and deterministic intervention planner
 - [ ] 06-02-PLAN.md — Implement manifest-backed checkpoint surgery, reload verification, and the researcher CLI
 
 ### Phase 7: Registry and Routing Observability
@@ -117,7 +117,7 @@ Phases execute in numeric order: 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 5. Environment Runtime Gate | 2/2 | Complete | 2026-03-19 |
-| 6. Checkpoint Surgery | 0/2 | Not started | - |
+| 6. Checkpoint Surgery | 1/2 | In Progress | - |
 | 7. Registry and Routing Observability | 0/2 | Not started | - |
 | 8. Warmup Separation | 0/2 | Not started | - |
 | 9. Mixed-Data Transfer | 0/2 | Not started | - |
