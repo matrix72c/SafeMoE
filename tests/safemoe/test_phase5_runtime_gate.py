@@ -330,6 +330,98 @@ def test_setup_normalizes_model_name_configs_to_safemoe_config(
     assert config.num_harmful_experts == 0
 
 
+def test_main_saves_phase5_gate_final_checkpoint_without_optimizer_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_get_dataloaders(*args: Any, **kwargs: Any):
+        loader = DataLoader(_TinyTokenDataset(), batch_size=1)
+        return None, loader
+
+    def fake_fit(**kwargs: Any) -> None:
+        kwargs["state"]["iter_num"] = 1
+        kwargs["state"]["step_count"] = 1
+
+    def fake_save_checkpoint(
+        fabric: lightning.Fabric,
+        state: dict[str, Any],
+        tokenizer_dir: Path | None,
+        checkpoint_file: Path,
+        include_optimizer: bool = True,
+    ) -> None:
+        captured["include_optimizer"] = include_optimizer
+        captured["checkpoint_file"] = checkpoint_file
+
+    class _MainDataStub:
+        def val_dataloaders(self) -> dict[str, DataLoader]:
+            loader = DataLoader(_TinyTokenDataset(), batch_size=1)
+            return {"D_std": loader, "D_harmful": loader}
+
+    monkeypatch.setattr(pretrain_module, "get_dataloaders", fake_get_dataloaders)
+    monkeypatch.setattr(pretrain_module, "fit", fake_fit)
+    monkeypatch.setattr(pretrain_module, "save_checkpoint", fake_save_checkpoint)
+
+    fabric = lightning.Fabric(devices=1, accelerator="cpu", strategy="auto")
+    fabric.launch()
+
+    config = SafeMoEConfig(
+        name=PHASE5_MODEL_NAME,
+        block_size=1024,
+        padded_vocab_size=128,
+        vocab_size=128,
+        n_layer=2,
+        n_head=2,
+        n_query_groups=2,
+        n_embd=32,
+        head_size=16,
+        rotary_percentage=1.0,
+        parallel_residual=False,
+        bias=False,
+        norm_class_name="RMSNorm",
+        mlp_class_name="LLaMAMoE",
+        moe_intermediate_size=64,
+        n_expert=4,
+        n_expert_per_token=2,
+        harmful_expert_indices=[],
+        num_harmful_experts=0,
+        harmful_attn_heads=[],
+    )
+
+    pretrain_module.main(
+        fabric=fabric,
+        devices=4,
+        num_nodes=1,
+        seed=42,
+        initial_checkpoint_dir=None,
+        resume=False,
+        config=config,
+        data=_MainDataStub(),
+        out_dir=tmp_path / "out",
+        tokenizer_dir=None,
+        tokenizer=None,
+        train=TrainArgs(
+            save_interval=None,
+            log_interval=1,
+            global_batch_size=4,
+            micro_batch_size=1,
+            max_tokens=4096,
+            max_seq_length=1024,
+            max_norm=1.0,
+            lr_warmup_steps=0,
+        ),
+        eval=EvalArgs(interval=999999, max_iters=1, initial_validation=False, final_validation=False),
+        optimizer="AdamW",
+        upsample_std=1.0,
+        upsample_harmful=1.0,
+        upsample_unlabeled=1.0,
+    )
+
+    assert captured["include_optimizer"] is False
+    assert captured["checkpoint_file"] == tmp_path / "out" / "final" / "lit_model.pth"
+
+
 def test_setup_prints_phase5_startup_metric_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -596,8 +596,16 @@ def main(
         phase5_runtime_gate=phase5_runtime_gate,
     )
 
-    # Save final checkpoint
-    save_checkpoint(fabric, state, tokenizer_dir, out_dir / "final" / "lit_model.pth")
+    # The Phase 5 runtime gate is a one-step measurement run. Saving optimizer
+    # state after a single sparse MoE step can fail under FSDP because many
+    # parameters legitimately have no optimizer slots yet.
+    save_checkpoint(
+        fabric,
+        state,
+        tokenizer_dir,
+        out_dir / "final" / "lit_model.pth",
+        include_optimizer=not phase5_runtime_gate,
+    )
 
     total_tokens = state["iter_num"] * train.micro_batch_size * model.max_seq_length * fabric.world_size
 
@@ -817,7 +825,13 @@ def fit(
             fabric.barrier()
 
         if train.save_interval is not None and state["step_count"] % train.save_interval == 0:
-            save_checkpoint(fabric, state, tokenizer_dir, out_dir / f"step-{state['step_count']:08d}" / "lit_model.pth")
+            save_checkpoint(
+                fabric,
+                state,
+                tokenizer_dir,
+                out_dir / f"step-{state['step_count']:08d}" / "lit_model.pth",
+                include_optimizer=not phase5_runtime_gate,
+            )
             # SGTM EVAL-03: mid-training ablation evaluation at each checkpoint
             if registry is not None and val_loaders is not None:
                 evaluate_with_ablation(
@@ -981,11 +995,12 @@ def initialize_weights(fabric: L.Fabric, model: GPT, n_layer: int, n_embd: int) 
 # save_checkpoint() — reused from litgpt
 # ---------------------------------------------------------------------------
 
-def save_checkpoint(fabric, state, tokenizer_dir, checkpoint_file):
+def save_checkpoint(fabric, state, tokenizer_dir, checkpoint_file, include_optimizer: bool = True):
     model = state["model"]
     checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
     fabric.print(f"Saving checkpoint to {str(checkpoint_file)!r}")
-    fabric.save(checkpoint_file, state)
+    save_state = state if include_optimizer else {k: v for k, v in state.items() if k != "optimizer"}
+    fabric.save(checkpoint_file, save_state)
     if fabric.global_rank == 0:
         save_hyperparameters(setup, checkpoint_file.parent)
         if tokenizer_dir is not None:
