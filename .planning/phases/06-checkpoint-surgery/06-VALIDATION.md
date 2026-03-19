@@ -19,18 +19,18 @@ created: 2026-03-19
 |----------|-------|
 | **Framework** | `pytest 9.0.2` |
 | **Config file** | `pyproject.toml` |
-| **Quick run command** | `pytest tests/safemoe/test_checkpoint_surgery.py -x` |
+| **Quick run command** | `pytest tests/safemoe/test_checkpoint_surgery.py::test_manifest_planner_is_deterministic -x` |
 | **Full suite command** | `pytest tests/safemoe -x` |
-| **Estimated runtime** | ~90 seconds |
+| **Estimated runtime** | ~20 seconds |
 
 ---
 
 ## Sampling Rate
 
-- **After every task commit:** Run `pytest tests/safemoe/test_checkpoint_surgery.py -x`
+- **After every task commit:** Run the narrowest task-specific checkpoint-surgery test, starting with `pytest tests/safemoe/test_checkpoint_surgery.py::test_manifest_planner_is_deterministic -x`
 - **After every plan wave:** Run `pytest tests/safemoe/test_checkpoint_surgery.py tests/safemoe/test_registry.py tests/safemoe/test_ablate.py -x`
 - **Before `$gsd-verify-work`:** Full suite must be green
-- **Max feedback latency:** 90 seconds
+- **Max feedback latency:** 20 seconds
 
 ---
 
@@ -71,7 +71,7 @@ created: 2026-03-19
 - [x] Sampling continuity: no 3 consecutive tasks without automated verify
 - [x] Wave 0 covers all MISSING references
 - [x] No watch-mode flags
-- [x] Feedback latency < 90s
+- [x] Feedback latency < 20s
 - [x] `nyquist_compliant: true` set in frontmatter
 
 **Approval:** pending
