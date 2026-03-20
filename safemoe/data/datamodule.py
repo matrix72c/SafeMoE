@@ -46,7 +46,7 @@ class MultiDataLoader(DataModule):
         if self.num_workers <= 0:
             return 0
 
-        cpu_count = os.cpu_count() or 1
+        cpu_count = len(os.sched_getaffinity(0)) or 1
         world_size = max(1, int(os.environ.get("WORLD_SIZE", "1")))
         concurrent_loaders = max(loader_count * world_size, 1)
         max_per_loader = max(1, cpu_count // concurrent_loaders)
