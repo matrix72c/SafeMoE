@@ -36,7 +36,6 @@ from litgpt.types import LoggerChoice
 from litgpt.utils import (
     CycleIterator,
     capture_hparams,
-    check_valid_checkpoint_dir,
     check_nvlink_connectivity,
     choose_logger,
     chunked_cross_entropy,
@@ -65,37 +64,6 @@ from safemoe.observability import (
 
 # SGTM: split labels for 3-path SGTM branching
 SPLIT_LABELS = ["D_std", "D_harmful", "D_unlabeled"]
-PHASE5_REQUIRED_CHECKPOINT_FILES = (
-    "lit_model.pth",
-    "model_config.yaml",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "config.json",
-    "generation_config.json",
-)
-PHASE5_REQUIRED_DATA_DIRS = (
-    "D_std/train",
-    "D_harmful/train",
-    "D_unlabeled/train",
-    "D_std/val",
-    "D_harmful/val",
-)
-PHASE5_GATE_MODEL_NAME = "Qwen3-30B-A3B-Base"
-PHASE5_GATE_DEVICES = 4
-PHASE5_GATE_NUM_NODES = 1
-PHASE5_GATE_GLOBAL_BATCH_SIZE = 4
-PHASE5_GATE_MICRO_BATCH_SIZE = 1
-PHASE5_GATE_MAX_SEQ_LENGTH = 1024
-PHASE5_GATE_MAX_TOKENS = 4096
-PHASE5_GATE_STARTUP_KEY = "PHASE5_GATE_STARTUP_SECONDS"
-PHASE5_GATE_FIRST_STEP_KEY = "PHASE5_GATE_FIRST_STEP_SECONDS"
-PHASE5_GATE_TOKENS_PER_SEC_KEY = "PHASE5_GATE_FIRST_STEP_TOKENS_PER_SEC"
-PHASE5_GATE_PEAK_MEMORY_KEY = "PHASE5_GATE_PEAK_MEMORY_GB"
-PHASE5_GATE_STARTUP_TEMPLATE = "PHASE5_GATE_STARTUP_SECONDS={:.4f}"
-PHASE5_GATE_FIRST_STEP_TEMPLATE = "PHASE5_GATE_FIRST_STEP_SECONDS={:.4f}"
-PHASE5_GATE_TOKENS_PER_SEC_TEMPLATE = "PHASE5_GATE_FIRST_STEP_TOKENS_PER_SEC={:.2f}"
-PHASE5_GATE_PEAK_MEMORY_TEMPLATE = "PHASE5_GATE_PEAK_MEMORY_GB={:.2f}"
-PHASE5_GATE_PEAK_MEMORY_NA = "PHASE5_GATE_PEAK_MEMORY_GB=NA"
 
 
 def active_split_labels(stage: Literal["transfer", "warmup"]) -> List[str]:
@@ -264,83 +232,6 @@ except ImportError:
     KVCache = None  # type: ignore[assignment,misc]
 
 
-def validate_phase5_checkpoint(checkpoint_dir: Path) -> Path:
-    checkpoint_dir = extend_checkpoint_dir(checkpoint_dir)
-    if not checkpoint_dir.is_dir():
-        raise FileNotFoundError(f"Phase 5 checkpoint gate requires a checkpoint directory: {checkpoint_dir}")
-
-    missing = [name for name in PHASE5_REQUIRED_CHECKPOINT_FILES if not (checkpoint_dir / name).exists()]
-    if missing:
-        raise FileNotFoundError(
-            "Phase 5 checkpoint gate missing required files in "
-            f"{checkpoint_dir}: {', '.join(missing)}"
-        )
-
-    check_valid_checkpoint_dir(checkpoint_dir, raise_error=True)
-    config = Config.from_file(checkpoint_dir / "model_config.yaml")
-    if config.name != PHASE5_GATE_MODEL_NAME:
-        raise ValueError(
-            f"Phase 5 gate requires config.name == '{PHASE5_GATE_MODEL_NAME}', got {config.name!r}"
-        )
-    return checkpoint_dir
-
-
-def validate_phase5_data_root(data_root: Path) -> Path:
-    missing = [name for name in PHASE5_REQUIRED_DATA_DIRS if not (data_root / name).is_dir()]
-    if missing:
-        raise FileNotFoundError(
-            "Phase 5 runtime gate missing prepared TinyStories cache directories under "
-            f"{data_root}: {', '.join(missing)}"
-        )
-    return data_root
-
-
-def resolve_phase5_gate_inputs(
-    initial_checkpoint_dir: Optional[Path],
-    tokenizer_dir: Optional[Path],
-    data: Optional[MultiDataLoader],
-) -> Tuple[Path, Path, Path]:
-    if initial_checkpoint_dir is None:
-        raise ValueError("Phase 5 gate requires --initial_checkpoint_dir checkpoints/Qwen3-30B-A3B-Base")
-
-    checkpoint_dir = validate_phase5_checkpoint(initial_checkpoint_dir)
-    tokenizer_dir = validate_phase5_checkpoint(tokenizer_dir or checkpoint_dir)
-    Tokenizer(tokenizer_dir)
-
-    if data is None:
-        raise ValueError("Phase 5 gate requires MultiDataLoader data configuration")
-
-    data_root = Path(data.cache_dir) / PHASE5_GATE_MODEL_NAME / f"{int(data.x)}-{int(data.y)}"
-    validate_phase5_data_root(data_root)
-    return checkpoint_dir, tokenizer_dir, data_root
-
-
-def matches_phase5_gate_contract(train: TrainArgs, devices: int, num_nodes: int) -> bool:
-    return (
-        devices == PHASE5_GATE_DEVICES
-        and num_nodes == PHASE5_GATE_NUM_NODES
-        and train.global_batch_size == PHASE5_GATE_GLOBAL_BATCH_SIZE
-        and train.micro_batch_size == PHASE5_GATE_MICRO_BATCH_SIZE
-        and train.max_seq_length == PHASE5_GATE_MAX_SEQ_LENGTH
-        and train.max_tokens == PHASE5_GATE_MAX_TOKENS
-    )
-
-
-def evaluate_warmup_acceptance(*args, **kwargs) -> dict:
-    from safemoe.evaluate import evaluate_warmup_acceptance as _evaluate_warmup_acceptance
-
-    return _evaluate_warmup_acceptance(*args, **kwargs)
-
-
-def should_emit_phase5_gate_metrics(
-    config_name: str,
-    train: TrainArgs,
-    devices: int,
-    num_nodes: int,
-) -> bool:
-    return config_name == PHASE5_GATE_MODEL_NAME and matches_phase5_gate_contract(train, devices, num_nodes)
-
-
 def ensure_safemoe_config(config: Union[Config, SafeMoEConfig]) -> SafeMoEConfig:
     if isinstance(config, SafeMoEConfig):
         return config
@@ -428,9 +319,6 @@ def setup(
 
     if tokenizer_dir is not None:
         tokenizer_dir = extend_checkpoint_dir(tokenizer_dir)
-
-    if initial_checkpoint_dir is not None:
-        initial_checkpoint_dir, tokenizer_dir, _ = resolve_phase5_gate_inputs(initial_checkpoint_dir, tokenizer_dir, data)
 
     if model_config is None:
         try:
@@ -531,14 +419,12 @@ def main(
 ) -> None:
     validate_args(train, eval, initial_checkpoint_dir, resume)
     validate_stage_upsampling(stage, upsample_unlabeled)
-    phase5_runtime_gate = should_emit_phase5_gate_metrics(config.name, train, devices, num_nodes)
 
     if fabric.global_rank == 0:
         out_dir.mkdir(parents=True, exist_ok=True)
 
     fabric.seed_everything(seed)  # same seed for every process to init model (FSDP)
 
-    startup_t0 = time.perf_counter() if phase5_runtime_gate and initial_checkpoint_dir else None
     t0 = time.perf_counter()
     with fabric.init_module(empty_init=True):
         model = GPT(config)
@@ -603,8 +489,6 @@ def main(
 
     if initial_checkpoint_dir:
         fabric.load_raw(initial_checkpoint_dir / "lit_model.pth", model)
-        if startup_t0 is not None:
-            fabric.print(PHASE5_GATE_STARTUP_TEMPLATE.format(time.perf_counter() - startup_t0))
 
     # SGTM: state dict with a single optimizer covering harmful/std/shared params
     state = {
@@ -664,39 +548,20 @@ def main(
         warmup_std_mass_ceiling=warmup_std_mass_ceiling,
         registry=registry,
         val_loaders=val_loaders_for_eval,
-        phase5_runtime_gate=phase5_runtime_gate,
     )
 
-    # The Phase 5 runtime gate is a one-step measurement run. Saving optimizer
-    # state after a single sparse MoE step can fail under FSDP because many
-    # parameters legitimately have no optimizer slots yet.
+    total_tokens = state["iter_num"] * train.micro_batch_size * model.max_seq_length * fabric.world_size
+
     save_checkpoint(
         fabric,
         state,
         tokenizer_dir,
         out_dir / "final" / "lit_model.pth",
-        include_optimizer=not phase5_runtime_gate,
     )
-    if stage == "warmup":
-        if initial_checkpoint_dir is None:
-            raise ValueError("Warmup stage requires initial_checkpoint_dir")
-        report = evaluate_warmup_acceptance(
-            initial_checkpoint_dir,
-            out_dir / "final",
-            out_dir=out_dir,
-            std_ppl_regression_tolerance=0.05,
-            required_post_routing_margin=0.10,
-            required_margin_gain=0.00,
-            blessed_checkpoint_name="warmup-blessed",
-        )
-        blessed_dir = out_dir / "warmup-blessed"
-        if blessed_dir.exists():
-            shutil.rmtree(blessed_dir)
-        if not report["pass"]:
-            raise ValueError("Warmup acceptance failed")
-        shutil.copytree(out_dir / "final", blessed_dir)
-
-    total_tokens = state["iter_num"] * train.micro_batch_size * model.max_seq_length * fabric.world_size
+    if stage == "warmup" and fabric.global_rank == 0:
+        fabric.print("Warmup training complete. Run warmup acceptance separately against:")
+        fabric.print(f"  pre:  {initial_checkpoint_dir}")
+        fabric.print(f"  post: {out_dir / 'final'}")
 
     separator = "-" * 40
     fabric.print(separator)
@@ -739,7 +604,6 @@ def fit(
     # SGTM: EVAL-03 — mid-training ablation evaluation
     registry: Optional["HarmfulParamRegistry"] = None,
     val_loaders: Optional[dict] = None,
-    phase5_runtime_gate: Optional[bool] = None,
     routing_parity_check: bool = False,
     stage: Literal["transfer", "warmup"] = "transfer",
     warmup_routing_loss_weight: float = 0.1,
@@ -749,8 +613,6 @@ def fit(
     model = state["model"]
     optimizer = state["optimizer"]
     validate_stage_upsampling(stage, upsample_unlabeled)
-    if phase5_runtime_gate is None:
-        phase5_runtime_gate = matches_phase5_gate_contract(train, devices, num_nodes)
 
     if eval.initial_validation:
         val_loss = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
@@ -800,11 +662,6 @@ def fit(
 
     # SGTM: warmup_iters uses D_std loader length as proxy for train_dataloader length
     warmup_iters = train.warmup_iters(devices, num_nodes, max_iters, data.get_loader("D_std"))
-    first_step_t0 = None
-    if phase5_runtime_gate and state["iter_num"] < max_iters:
-        first_step_t0 = time.perf_counter()
-        if fabric.device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats()
 
     # SGTM: iter_num counts micro-batches; step_count counts optimizer steps
     # The outer while loop drives one OPTIMIZER STEP per iteration (accum_iters micro-batches)
@@ -874,18 +731,6 @@ def fit(
             gradient_masker.mask(split_label)
         fabric.clip_gradients(model, optimizer, max_norm=train.max_norm)
         optimizer.step()
-        if first_step_t0 is not None:
-            first_step_seconds = time.perf_counter() - first_step_t0
-            first_step_tokens = train.global_batch_size * model.max_seq_length
-            first_step_tokens_per_sec = first_step_tokens / first_step_seconds
-            fabric.print(PHASE5_GATE_FIRST_STEP_TEMPLATE.format(first_step_seconds))
-            fabric.print(PHASE5_GATE_TOKENS_PER_SEC_TEMPLATE.format(first_step_tokens_per_sec))
-            if fabric.device.type == "cuda":
-                torch.cuda.synchronize()
-                fabric.print(PHASE5_GATE_PEAK_MEMORY_TEMPLATE.format(torch.cuda.max_memory_allocated() / 1e9))
-            else:
-                fabric.print(PHASE5_GATE_PEAK_MEMORY_NA)
-            first_step_t0 = None
         optimizer.zero_grad(set_to_none=True)
 
         state["step_count"] += 1
@@ -965,7 +810,6 @@ def fit(
                 state,
                 tokenizer_dir,
                 checkpoint_dir / "lit_model.pth",
-                include_optimizer=not phase5_runtime_gate,
             )
             # SGTM EVAL-03: mid-training ablation evaluation at each checkpoint
             if registry is not None and val_loaders is not None:
@@ -1175,13 +1019,48 @@ def save_checkpoint(fabric, state, tokenizer_dir, checkpoint_file, include_optim
     model = state["model"]
     checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
     fabric.print(f"Saving checkpoint to {str(checkpoint_file)!r}")
-    save_state = state if include_optimizer else {k: v for k, v in state.items() if k != "optimizer"}
-    fabric.save(checkpoint_file, save_state)
+    save_state = _checkpoint_state_for_save(state, include_optimizer=include_optimizer)
+    try:
+        fabric.save(checkpoint_file, save_state)
+    except AssertionError as ex:
+        if not _should_retry_fsdp_checkpoint_without_optimizer(fabric, ex, include_optimizer):
+            raise
+        fabric.print(
+            "FSDP optimizer-state checkpointing hit a torch assertion; retrying without optimizer state."
+        )
+        fabric.save(checkpoint_file, _checkpoint_state_for_save(state, include_optimizer=False))
     if fabric.global_rank == 0:
         save_hyperparameters(setup, checkpoint_file.parent)
         if tokenizer_dir is not None:
             copy_config_files(tokenizer_dir, checkpoint_file.parent)
         save_config(model.config, checkpoint_file.parent)
+
+
+def _checkpoint_state_for_save(state, include_optimizer: bool):
+    if include_optimizer:
+        _ensure_optimizer_state_coverage(state["optimizer"])
+        return state
+    return {k: v for k, v in state.items() if k != "optimizer"}
+
+
+def _ensure_optimizer_state_coverage(optimizer) -> None:
+    """Backfill empty optimizer-state entries for params that have never stepped.
+
+    Adam-style optimizers allocate per-parameter state lazily when a parameter
+    first receives a gradient. Under split-masked training, some parameters can
+    legitimately stay untouched for many steps, but FSDP full optimizer-state
+    checkpointing still expects every optimizer-managed parameter to exist in
+    ``optimizer.state``.
+    """
+    for param_group in optimizer.param_groups:
+        for param in param_group["params"]:
+            optimizer.state.setdefault(param, {})
+
+
+def _should_retry_fsdp_checkpoint_without_optimizer(fabric, ex: AssertionError, include_optimizer: bool) -> bool:
+    if not include_optimizer or not isinstance(fabric.strategy, FSDPStrategy):
+        return False
+    return "Manually calculated _sharded_numel_padded is incorrect" in str(ex)
 
 
 # ---------------------------------------------------------------------------
