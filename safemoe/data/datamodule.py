@@ -69,11 +69,14 @@ class MultiDataLoader(DataModule):
         self.batch_size = batch_size
         self.max_seq_length = max_seq_length + 1  # +1 for next-token target
 
+    def _base_dir(self) -> Path:
+        tokenizer_name = self.tokenizer.model_name if self.tokenizer else "default"
+        return self.cache_dir / tokenizer_name / f"{int(self.x)}-{int(self.y)}"
+
     def setup(self, stage: str = "") -> None:
         from litdata.streaming import StreamingDataLoader, StreamingDataset, TokensLoader
 
-        tokenizer_name = self.tokenizer.model_name if self.tokenizer else "default"
-        base = self.cache_dir / tokenizer_name / f"{int(self.x)}-{int(self.y)}"
+        base = self._base_dir()
         num_workers = self._effective_num_workers(loader_count=3)
 
         def make_loader(split_name: str) -> StreamingDataLoader:
@@ -102,31 +105,39 @@ class MultiDataLoader(DataModule):
             raise RuntimeError("Call setup() before get_loader()")
         return self._loaders[split_name]  # KeyError propagates for unknown split names
 
-    def val_dataloaders(self) -> dict:
-        """Returns {D_std: DataLoader, D_harmful: DataLoader}. No D_unlabeled val set."""
-        from litdata.streaming import StreamingDataLoader, StreamingDataset, TokensLoader
+    def val_datasets(self) -> dict:
+        """Returns {D_std: StreamingDataset, D_harmful: StreamingDataset} for eval-only batching."""
+        from litdata.streaming import StreamingDataset, TokensLoader
 
-        tokenizer_name = self.tokenizer.model_name if self.tokenizer else "default"
-        base = self.cache_dir / tokenizer_name / f"{int(self.x)}-{int(self.y)}"
-        num_workers = self._effective_num_workers(loader_count=2)
+        base = self._base_dir()
 
-        def make_val_loader(split_name: str) -> StreamingDataLoader:
-            ds = StreamingDataset(
+        def make_val_dataset(split_name: str) -> StreamingDataset:
+            return StreamingDataset(
                 input_dir=str(base / split_name / "val"),
                 item_loader=TokensLoader(block_size=self.max_seq_length),
                 shuffle=False,
             )
-            return StreamingDataLoader(
-                ds,
+
+        return {
+            "D_std": make_val_dataset("D_std"),
+            "D_harmful": make_val_dataset("D_harmful"),
+        }
+
+    def val_dataloaders(self) -> dict:
+        """Returns {D_std: DataLoader, D_harmful: DataLoader}. No D_unlabeled val set."""
+        from litdata.streaming import StreamingDataLoader
+
+        num_workers = self._effective_num_workers(loader_count=2)
+
+        return {
+            split_name: StreamingDataLoader(
+                dataset,
                 batch_size=self.batch_size,
                 num_workers=num_workers,
                 pin_memory=True,
                 drop_last=False,
             )
-
-        return {
-            "D_std":     make_val_loader("D_std"),
-            "D_harmful": make_val_loader("D_harmful"),
+            for split_name, dataset in self.val_datasets().items()
         }
 
     def train_dataloader(self):
