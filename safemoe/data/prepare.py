@@ -1,93 +1,143 @@
-"""Data preparation pipeline for SafeMoE: tokenization and split partitioning.
+"""Data preparation pipeline for SafeMoE: per-dataset tokenization and ratio-based splitting.
 
-Implements the two-parameter split formula (x, y):
-  - D_std      = first y%  of EN rows
-  - D_harmful  = first (100-x)% of ES rows
-  - D_unlabeled = remaining (100-y)% EN + remaining x% ES rows
+Two-phase prepare:
+  Phase 1 (expensive, once per dataset+tokenizer): tokenize all samples individually
+  Phase 2 (cheap, re-run when ratio changes): split by label_ratio and repack with TokensLoader
 
-CLI usage:
-  python -m safemoe.data.prepare --x 0 --y 25 --num_workers 4
-
-Cache layout (integer-keyed):
-  data/.cache/{tokenizer_name}/{x}-{y}/D_std/train/
-  data/.cache/{tokenizer_name}/{x}-{y}/D_std/val/
-  data/.cache/{tokenizer_name}/{x}-{y}/D_harmful/train/
-  data/.cache/{tokenizer_name}/{x}-{y}/D_harmful/val/
-  data/.cache/{tokenizer_name}/{x}-{y}/D_unlabeled/train/
-  (No D_unlabeled/val)
+Cache layout:
+  data/.cache/{tokenizer_name}/{dataset_id}/
+      manifest.json
+      samples_train/       # Phase 1: per-sample token storage (no TokensLoader)
+      val/                 # Phase 1: TokensLoader format (full val, no ratio split)
+      splits/r{pct}/
+          labeled_train/   # Phase 2: TokensLoader format, first ratio% samples
+          unlabeled_train/ # Phase 2: TokensLoader format, remaining samples
 """
 
 from __future__ import annotations
 
-import argparse
+import json
+import shutil
 from functools import partial
 from pathlib import Path
 from typing import Optional
 
-import torch
-from litdata import optimize, TokensLoader
+from litdata import StreamingDataset, optimize, TokensLoader
 
 
 # ---------------------------------------------------------------------------
-# Public API: compute_splits
+# Helpers: text loading
 # ---------------------------------------------------------------------------
 
 
-def compute_splits(
-    en_stories: list[str],
-    es_stories: list[str],
-    x: int = 0,
-    y: int = 25,
-) -> dict[str, list[str]]:
-    """Partition EN and ES stories into three named splits.
+def load_texts(path: Path, text_column: str, split: str) -> list[str]:
+    """Load text strings from parquet or jsonl files under path/{split}.*."""
+    path = Path(path)
+    # Try parquet first
+    parquet_path = path / f"{split}.parquet"
+    if parquet_path.exists():
+        import pandas as pd
+        return pd.read_parquet(parquet_path)[text_column].tolist()
 
-    Args:
-        en_stories: List of English story strings.
-        es_stories: List of Spanish story strings.
-        x: Percentage of ES rows that goes to D_unlabeled (ES leak parameter).
-           Range [0, 100]. Default 0 — all ES rows go to D_harmful.
-        y: Percentage of EN rows that goes to D_std (EN retention parameter).
-           Range [0, 100]. Default 25.
+    # Try jsonl
+    jsonl_path = path / f"{split}.jsonl"
+    if jsonl_path.exists():
+        import json as _json
+        texts = []
+        for line in jsonl_path.read_text().splitlines():
+            if line.strip():
+                texts.append(_json.loads(line)[text_column])
+        return texts
 
-    Returns:
-        dict with keys "D_std", "D_harmful", "D_unlabeled".
-    """
-    n_en = len(en_stories)
-    n_es = len(es_stories)
+    # Try validation -> "validation" naming convention
+    if split == "val":
+        return load_texts(path, text_column, "validation")
 
-    std_end = int(y / 100.0 * n_en)
-    harmful_end = int((100 - x) / 100.0 * n_es)
+    raise FileNotFoundError(
+        f"No {split}.parquet or {split}.jsonl found in {path}"
+    )
 
-    d_std = en_stories[:std_end]
-    d_harmful = es_stories[:harmful_end]
-    d_unlabeled = en_stories[std_end:] + es_stories[harmful_end:]
 
-    return {
-        "D_std": d_std,
-        "D_harmful": d_harmful,
-        "D_unlabeled": d_unlabeled,
+# ---------------------------------------------------------------------------
+# Helpers: manifest
+# ---------------------------------------------------------------------------
+
+
+def write_manifest(
+    base_dir: Path,
+    dataset_id: str,
+    num_train_samples: int,
+    num_val_samples: int,
+    tokenizer_name: str,
+    source_path: str,
+) -> None:
+    manifest = {
+        "dataset_id": dataset_id,
+        "num_train_samples": num_train_samples,
+        "num_val_samples": num_val_samples,
+        "tokenizer": tokenizer_name,
+        "source_path": str(source_path),
     }
+    manifest_path = base_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+
+def read_manifest(base_dir: Path) -> dict:
+    manifest_path = base_dir / "manifest.json"
+    return json.loads(manifest_path.read_text())
+
+
+def _count_nonempty_texts(texts: list[str]) -> int:
+    return sum(1 for text in texts if text and text.strip())
+
+
+def _dataset_is_ready(output_dir: Path) -> bool:
+    return (output_dir / "index.json").exists()
+
+
+def _reset_incomplete_output_dir(output_dir: Path) -> None:
+    if output_dir.exists() and not _dataset_is_ready(output_dir):
+        shutil.rmtree(output_dir)
+
+
+def _dataset_length(input_dir: Path) -> int:
+    index_path = input_dir / "index.json"
+    index_data = json.loads(index_path.read_text())
+    return sum(chunk["chunk_size"] for chunk in index_data["chunks"])
 
 
 # ---------------------------------------------------------------------------
-# Tokenization helpers
+# Helpers: contiguous splitting for workers
 # ---------------------------------------------------------------------------
 
 
-def tokenize_stories(stories: list[str], tokenizer) -> None:
-    """Generator that yields token tensors for each story.
+def split_contiguous(indices: range, n_workers: int) -> list[list[int]]:
+    """Split a contiguous index range into n non-overlapping chunks for workers."""
+    total = len(indices)
+    if total == 0:
+        return []
+    n_workers = min(n_workers, total)
+    if n_workers < 1:
+        n_workers = 1
+    chunk_size = total // n_workers
+    remainder = total % n_workers
+    chunks = []
+    start_val = indices.start
+    for i in range(n_workers):
+        size = chunk_size + (1 if i < remainder else 0)
+        chunks.append(list(range(start_val, start_val + size)))
+        start_val += size
+    return [c for c in chunks if c]
 
-    Avoids reading DATA_OPTIMIZER_* environment variables.
-    Works as the ``fn`` argument to ``litdata.optimize()``.
 
-    Args:
-        stories: List of story strings assigned to this worker.
-        tokenizer: Object with ``.encode(text, bos, eos) -> torch.Tensor``.
+# ---------------------------------------------------------------------------
+# Tokenization generators
+# ---------------------------------------------------------------------------
 
-    Yields:
-        torch.Tensor of token ids (dtype=torch.long) for each story.
-    """
-    for text in stories:
+
+def _tokenize_texts(texts: list[str], tokenizer) -> None:
+    """Yield per-sample token tensors. Used for Phase 1 (no TokensLoader)."""
+    for text in texts:
         text = text.strip()
         if not text:
             continue
@@ -95,214 +145,155 @@ def tokenize_stories(stories: list[str], tokenizer) -> None:
         yield tokens
 
 
+def _tokenize_texts_for_tokens_loader(texts: list[str], tokenizer) -> None:
+    """Yield per-sample token tensors. Used with TokensLoader for val."""
+    for text in texts:
+        text = text.strip()
+        if not text:
+            continue
+        tokens = tokenizer.encode(text, bos=True, eos=False)
+        yield tokens
+
+
+def _yield_range(index_range: list[int], input_dir: str) -> None:
+    """Read samples by index from a Phase 1 dataset and yield them for Phase 2."""
+    ds = StreamingDataset(input_dir=input_dir)
+    for i in index_range:
+        yield ds[i]
+
+
 # ---------------------------------------------------------------------------
-# Internal: idempotent optimize wrapper
+# Public API: prepare_dataset
 # ---------------------------------------------------------------------------
 
 
-def _maybe_optimize(
-    stories: list[str],
-    output_dir: Path,
+def prepare_dataset(
+    dataset_id: str,
+    data_path: Path,
+    text_column: str,
+    label_ratio: float,
     tokenizer,
-    num_workers: int,
-    chunk_bytes: str,
-    start_method: str = "fork",
-) -> None:
-    """Call litdata.optimize() unless output_dir already exists.
-
-    Idempotency: if the directory already contains data (i.e., it exists),
-    skip tokenization entirely.
-
-    Args:
-        stories: All story strings for this split.
-        output_dir: Target directory for LitData output.
-        tokenizer: Tokenizer with ``.encode()`` method.
-        num_workers: Number of parallel workers for optimize().
-        chunk_bytes: Chunk size string (e.g. "200MB").
-        start_method: Multiprocessing start method. Default "fork" — avoids
-            pickle errors for in-memory tokenizer objects. Use "spawn" for
-            cross-platform compatibility.
-    """
-    if output_dir.exists():
-        return
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    if not stories:
-        # Empty split — create directory but skip optimize
-        return
-
-    # Distribute stories across workers (each worker gets a non-overlapping slice)
-    effective_workers = min(num_workers, len(stories))
-    if effective_workers < 1:
-        effective_workers = 1
-    inputs = [stories[i::effective_workers] for i in range(effective_workers)]
-    # Remove empty slices that arise when len(stories) < num_workers
-    inputs = [s for s in inputs if s]
-
-    optimize(
-        fn=partial(tokenize_stories, tokenizer=tokenizer),
-        inputs=inputs,
-        output_dir=str(output_dir),
-        num_workers=len(inputs),
-        chunk_bytes=chunk_bytes,
-        item_loader=TokensLoader(),
-        start_method=start_method,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Public API: prepare
-# ---------------------------------------------------------------------------
-
-
-def prepare(
-    checkpoint_dir: Optional[Path] = None,
-    data_dir: Path = Path("data/multilingual-tinystories"),
-    cache_dir: Path = Path("data/.cache"),
-    x: int = 0,
-    y: int = 25,
+    cache_dir: Path,
+    seed: int = 42,
     num_workers: int = 4,
     chunk_bytes: str = "200MB",
-    # ---- test injection hooks (optional) -----------------------------------
-    tokenizer=None,
-    en_train: Optional[list[str]] = None,
-    es_train: Optional[list[str]] = None,
-    en_val: Optional[list[str]] = None,
-    es_val: Optional[list[str]] = None,
-) -> None:
-    """Tokenize and partition the TinyStories bilingual corpus.
+    # test injection hooks
+    train_texts: Optional[list[str]] = None,
+    val_texts: Optional[list[str]] = None,
+) -> dict:
+    """Two-phase prepare for a single dataset. Returns manifest dict."""
+    data_path = Path(data_path)
+    cache_dir = Path(cache_dir)
+    tokenizer_name = tokenizer.model_name if hasattr(tokenizer, "model_name") else "default"
+    base_dir = cache_dir / tokenizer_name / dataset_id
 
-    Reads EN and ES parquet files, applies the two-parameter split formula,
-    and writes LitData streaming chunks to::
+    samples_train_dir = base_dir / "samples_train"
+    val_dir = base_dir / "val"
 
-        cache_dir/{tokenizer_name}/{x}-{y}/D_std/train/
-        cache_dir/{tokenizer_name}/{x}-{y}/D_std/val/
-        cache_dir/{tokenizer_name}/{x}-{y}/D_harmful/train/
-        cache_dir/{tokenizer_name}/{x}-{y}/D_harmful/val/
-        cache_dir/{tokenizer_name}/{x}-{y}/D_unlabeled/train/
+    # ---- Phase 1: tokenize full dataset (idempotent) ----------------------
+    if not _dataset_is_ready(samples_train_dir):
+        _reset_incomplete_output_dir(samples_train_dir)
+        texts = train_texts if train_texts is not None else load_texts(data_path, text_column, "train")
+        num_train = _count_nonempty_texts(texts)
 
-    (D_unlabeled has no val set.)
+        samples_train_dir.mkdir(parents=True, exist_ok=True)
+        if texts:
+            effective_workers = min(num_workers, len(texts))
+            if effective_workers < 1:
+                effective_workers = 1
+            inputs = [texts[i::effective_workers] for i in range(effective_workers)]
+            inputs = [s for s in inputs if s]
 
-    The function is idempotent: if an output directory already exists, it is
-    skipped without re-tokenizing.
+            optimize(
+                fn=partial(_tokenize_texts, tokenizer=tokenizer),
+                inputs=inputs,
+                output_dir=str(samples_train_dir),
+                num_workers=len(inputs),
+                chunk_bytes=chunk_bytes,
+                # No item_loader: store per-sample for boundary preservation
+                start_method="fork",
+            )
+    else:
+        num_train = _dataset_length(samples_train_dir)
 
-    Args:
-        checkpoint_dir: Path to tokenizer checkpoint directory.
-            Defaults to ``checkpoints/Qwen3-30B-A3B-Base``.
-        data_dir: Directory containing ``{en,es}/{train,validation}.parquet``.
-        cache_dir: Root cache directory for LitData output.
-        x: ES leak percentage (0 = no ES in D_unlabeled). Default 0.
-        y: EN retention percentage for D_std. Default 25.
-        num_workers: Number of litdata.optimize() workers.
-        chunk_bytes: Chunk size for LitData binary chunks.
-        tokenizer: (Test injection) Pre-built tokenizer. When provided,
-            ``checkpoint_dir`` is ignored.
-        en_train: (Test injection) Overrides parquet EN train rows.
-        es_train: (Test injection) Overrides parquet ES train rows.
-        en_val: (Test injection) Overrides parquet EN val rows.
-        es_val: (Test injection) Overrides parquet ES val rows.
-    """
-    # Ensure x and y are plain ints (guard against float CLI input)
-    x = int(x)
-    y = int(y)
+    if not _dataset_is_ready(val_dir):
+        _reset_incomplete_output_dir(val_dir)
+        v_texts = val_texts if val_texts is not None else load_texts(data_path, text_column, "val")
+        num_val = _count_nonempty_texts(v_texts)
 
-    # --- Tokenizer -----------------------------------------------------------
-    if tokenizer is None:
-        if checkpoint_dir is None:
-            checkpoint_dir = Path("checkpoints/Qwen3-30B-A3B-Base")
-        checkpoint_dir = Path(checkpoint_dir)
-        from litgpt.tokenizer import Tokenizer as LitGPTTokenizer
-        tokenizer = LitGPTTokenizer(checkpoint_dir)
+        val_dir.mkdir(parents=True, exist_ok=True)
+        if v_texts:
+            effective_workers = min(num_workers, len(v_texts))
+            if effective_workers < 1:
+                effective_workers = 1
+            inputs = [v_texts[i::effective_workers] for i in range(effective_workers)]
+            inputs = [s for s in inputs if s]
 
-    # --- Load stories (or use injected data for tests) -----------------------
-    if en_train is None or es_train is None or en_val is None or es_val is None:
-        import pandas as pd
-        data_dir = Path(data_dir)
-        en_train = pd.read_parquet(data_dir / "en" / "train.parquet")["text"].tolist()
-        es_train = pd.read_parquet(data_dir / "es" / "train.parquet")["text"].tolist()
-        en_val = pd.read_parquet(data_dir / "en" / "validation.parquet")["text"].tolist()
-        es_val = pd.read_parquet(data_dir / "es" / "validation.parquet")["text"].tolist()
+            optimize(
+                fn=partial(_tokenize_texts_for_tokens_loader, tokenizer=tokenizer),
+                inputs=inputs,
+                output_dir=str(val_dir),
+                num_workers=len(inputs),
+                chunk_bytes=chunk_bytes,
+                item_loader=TokensLoader(),
+                start_method="fork",
+            )
+    else:
+        num_val = _dataset_length(val_dir)
 
-    # --- Split formula -------------------------------------------------------
-    splits = compute_splits(en_train, es_train, x=x, y=y)
+    # Keep manifest aligned with the actual on-disk dataset lengths.
+    if not (base_dir / "manifest.json").exists():
+        write_manifest(base_dir, dataset_id, num_train, num_val, tokenizer_name, str(data_path))
+    else:
+        manifest = read_manifest(base_dir)
+        if (
+            manifest.get("num_train_samples") != num_train
+            or manifest.get("num_val_samples") != num_val
+            or manifest.get("source_path") != str(data_path)
+        ):
+            write_manifest(base_dir, dataset_id, num_train, num_val, tokenizer_name, str(data_path))
 
-    # --- Output base directory (integer-keyed) --------------------------------
-    out_base = Path(cache_dir) / tokenizer.model_name / f"{x}-{y}"
+    # ---- Phase 2: split by label_ratio (idempotent) -----------------------
+    ratio_pct = int(round(label_ratio * 100))
+    split_dir = base_dir / "splits" / f"r{ratio_pct}"
+    labeled_train_dir = split_dir / "labeled_train"
+    unlabeled_train_dir = split_dir / "unlabeled_train"
 
-    # --- Tokenize each split -------------------------------------------------
-    _maybe_optimize(splits["D_std"], out_base / "D_std" / "train",
-                    tokenizer, num_workers, chunk_bytes)
-    _maybe_optimize(en_val, out_base / "D_std" / "val",
-                    tokenizer, num_workers, chunk_bytes)
-    _maybe_optimize(splits["D_harmful"], out_base / "D_harmful" / "train",
-                    tokenizer, num_workers, chunk_bytes)
-    _maybe_optimize(es_val, out_base / "D_harmful" / "val",
-                    tokenizer, num_workers, chunk_bytes)
-    _maybe_optimize(splits["D_unlabeled"], out_base / "D_unlabeled" / "train",
-                    tokenizer, num_workers, chunk_bytes)
-    # No D_unlabeled/val
+    manifest = read_manifest(base_dir)
+    n = manifest["num_train_samples"]
+    split_idx = int(n * label_ratio)
 
+    # Write labeled_train/
+    if split_idx > 0 and not _dataset_is_ready(labeled_train_dir):
+        _reset_incomplete_output_dir(labeled_train_dir)
+        labeled_train_dir.mkdir(parents=True, exist_ok=True)
+        chunks = split_contiguous(range(split_idx), min(num_workers, split_idx))
+        if chunks:
+            optimize(
+                fn=partial(_yield_range, input_dir=str(samples_train_dir)),
+                inputs=chunks,
+                output_dir=str(labeled_train_dir),
+                num_workers=len(chunks),
+                chunk_bytes=chunk_bytes,
+                item_loader=TokensLoader(),
+                start_method="fork",
+            )
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
+    # Write unlabeled_train/
+    if split_idx < n and not _dataset_is_ready(unlabeled_train_dir):
+        _reset_incomplete_output_dir(unlabeled_train_dir)
+        unlabeled_train_dir.mkdir(parents=True, exist_ok=True)
+        remaining = n - split_idx
+        chunks = split_contiguous(range(split_idx, n), min(num_workers, remaining))
+        if chunks:
+            optimize(
+                fn=partial(_yield_range, input_dir=str(samples_train_dir)),
+                inputs=chunks,
+                output_dir=str(unlabeled_train_dir),
+                num_workers=len(chunks),
+                chunk_bytes=chunk_bytes,
+                item_loader=TokensLoader(),
+                start_method="fork",
+            )
 
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Tokenize and partition TinyStories bilingual dataset."
-    )
-    parser.add_argument(
-        "--checkpoint_dir",
-        type=Path,
-        default=Path("checkpoints/Qwen3-30B-A3B-Base"),
-        help="Path to tokenizer checkpoint directory.",
-    )
-    parser.add_argument(
-        "--data_dir",
-        type=Path,
-        default=Path("data/multilingual-tinystories"),
-        help="Directory containing {en,es}/{train,validation}.parquet files.",
-    )
-    parser.add_argument(
-        "--cache_dir",
-        type=Path,
-        default=Path("data/.cache"),
-        help="Root cache directory for LitData output.",
-    )
-    parser.add_argument(
-        "--x",
-        type=int,
-        default=0,
-        help="ES leak percentage (0 = all ES goes to D_harmful). Default: 0.",
-    )
-    parser.add_argument(
-        "--y",
-        type=int,
-        default=25,
-        help="EN retention percentage for D_std. Default: 25.",
-    )
-    parser.add_argument(
-        "--num_workers",
-        type=int,
-        default=4,
-        help="Number of litdata.optimize() workers. Default: 4.",
-    )
-    parser.add_argument(
-        "--chunk_bytes",
-        type=str,
-        default="200MB",
-        help="Chunk size for LitData binary chunks. Default: 200MB.",
-    )
-    args = parser.parse_args()
-
-    prepare(
-        checkpoint_dir=args.checkpoint_dir,
-        data_dir=args.data_dir,
-        cache_dir=args.cache_dir,
-        x=args.x,
-        y=args.y,
-        num_workers=args.num_workers,
-        chunk_bytes=args.chunk_bytes,
-    )
+    return manifest

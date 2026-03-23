@@ -4,6 +4,7 @@
 import math
 import pprint
 import random  # SGTM: split sampling via random.choices
+import shlex
 import shutil
 import sys
 import time
@@ -12,7 +13,7 @@ from dataclasses import asdict
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 
 import lightning as L
 import torch
@@ -53,7 +54,7 @@ from litgpt.utils import (
 
 # SGTM: safemoe-specific imports for single-optimizer masking infrastructure
 from safemoe.config import SafeMoEConfig
-from safemoe.data.datamodule import MultiDataLoader
+from safemoe.data.datamodule import SafeDataModule
 from safemoe.masking import ActivationMasker, GradientMasker, HarmfulParamRegistry
 from safemoe.model import SafeMoELayer
 from safemoe.observability import (
@@ -61,9 +62,116 @@ from safemoe.observability import (
     assert_routing_parity,
     write_routing_artifacts,
 )
+from safemoe.surgery import setup as surgery_setup
 
 # SGTM: split labels for 3-path SGTM branching
 SPLIT_LABELS = ["D_std", "D_harmful", "D_unlabeled"]
+
+
+class WarmupSurgeryArgs(NamedTuple):
+    base_checkpoint: Path
+    num_harmful_experts: int
+    num_harmful_attn_heads: int
+    seed: int
+    epsilon: float
+
+
+def resolve_out_dir(out_dir: Optional[Path]) -> Path:
+    if out_dir is not None:
+        return init_out_dir(out_dir)
+    config_path = _config_path_from_argv(sys.argv[1:])
+    if config_path is not None:
+        return init_out_dir(Path("checkpoints") / config_path.stem)
+    return init_out_dir(Path("out/pretrain"))
+
+
+def _config_path_from_argv(argv: List[str]) -> Optional[Path]:
+    expanded_args: list[str] = []
+    for arg in argv:
+        if arg.startswith("@") and len(arg) > 1:
+            expanded_args.extend(shlex.split(Path(arg[1:]).read_text()))
+        else:
+            expanded_args.append(arg)
+
+    for index, arg in enumerate(expanded_args):
+        if arg in {"--config", "-c"} and index + 1 < len(expanded_args):
+            return Path(expanded_args[index + 1])
+        if arg.startswith("--config="):
+            return Path(arg.split("=", 1)[1])
+        if arg.startswith("-c="):
+            return Path(arg.split("=", 1)[1])
+    return None
+
+
+def maybe_prepare_warmup_checkpoint(
+    *,
+    stage: Literal["transfer", "warmup"],
+    initial_checkpoint_dir: Optional[Path],
+    base_checkpoint: Optional[Path],
+    num_harmful_experts: Optional[int],
+    num_harmful_attn_heads: Optional[int],
+    seed: int,
+    epsilon: Optional[float],
+) -> Optional[Path]:
+    if stage != "warmup":
+        if any(value is not None for value in (base_checkpoint, num_harmful_experts, num_harmful_attn_heads, epsilon)):
+            raise ValueError("Warmup auto-surgery args can only be used when `stage=warmup`.")
+        return initial_checkpoint_dir
+
+    surgery_args = _build_warmup_surgery_args(
+        initial_checkpoint_dir=initial_checkpoint_dir,
+        base_checkpoint=base_checkpoint,
+        num_harmful_experts=num_harmful_experts,
+        num_harmful_attn_heads=num_harmful_attn_heads,
+        seed=seed,
+        epsilon=epsilon,
+    )
+    if surgery_args is None:
+        return initial_checkpoint_dir
+    return surgery_setup(
+        base_checkpoint=surgery_args.base_checkpoint,
+        num_harmful_experts=surgery_args.num_harmful_experts,
+        num_harmful_attn_heads=surgery_args.num_harmful_attn_heads,
+        seed=surgery_args.seed,
+        epsilon=surgery_args.epsilon,
+    )
+
+
+def _build_warmup_surgery_args(
+    *,
+    initial_checkpoint_dir: Optional[Path],
+    base_checkpoint: Optional[Path],
+    num_harmful_experts: Optional[int],
+    num_harmful_attn_heads: Optional[int],
+    seed: int,
+    epsilon: Optional[float],
+) -> Optional[WarmupSurgeryArgs]:
+    fields = {
+        "base_checkpoint": base_checkpoint,
+        "num_harmful_experts": num_harmful_experts,
+        "num_harmful_attn_heads": num_harmful_attn_heads,
+        "epsilon": epsilon,
+    }
+    if not any(value is not None for value in fields.values()):
+        return None
+    missing_fields = [name for name, value in fields.items() if value is None]
+    if missing_fields:
+        raise ValueError(
+            "Warmup auto-surgery requires all of "
+            "`base_checkpoint`, `num_harmful_experts`, `num_harmful_attn_heads`, and `epsilon`."
+        )
+    if initial_checkpoint_dir is not None:
+        raise ValueError(
+            "Can't provide both `--initial_checkpoint_dir` and warmup auto-surgery args. "
+            "Use the surgery source checkpoint via `--base_checkpoint` only."
+        )
+    return WarmupSurgeryArgs(
+        base_checkpoint=Path(base_checkpoint),
+        num_harmful_experts=int(num_harmful_experts),
+        num_harmful_attn_heads=int(num_harmful_attn_heads),
+        seed=seed,
+        epsilon=float(epsilon),
+    )
 
 
 def active_split_labels(stage: Literal["transfer", "warmup"]) -> List[str]:
@@ -246,12 +354,11 @@ def setup(
     model_name: str,
     # SGTM: SafeMoEConfig instead of litgpt.Config
     model_config: Optional[SafeMoEConfig] = None,
-    out_dir: Path = Path("out/pretrain"),
+    out_dir: Optional[Path] = None,
     precision: Literal["bf16-true", "bf16-mixed", "32-true", None] = None,
     initial_checkpoint_dir: Optional[Path] = None,
     resume: Union[bool, Literal["auto"], Path] = False,
-    # SGTM: MultiDataLoader instead of DataModule
-    data: Optional[MultiDataLoader] = None,
+    data: Optional[SafeDataModule] = None,
     train: TrainArgs = TrainArgs(
         save_interval=1000,
         log_interval=1,
@@ -279,17 +386,21 @@ def setup(
     warmup_routing_loss_weight: float = 0.1,
     warmup_harmful_mass_floor: float = 0.6,
     warmup_std_mass_ceiling: float = 0.4,
+    base_checkpoint: Optional[Path] = None,
+    num_harmful_experts: Optional[int] = None,
+    num_harmful_attn_heads: Optional[int] = None,
+    epsilon: Optional[float] = None,
 ):
     """Pretrain a SafeMoE model with SGTM single-optimizer 3-path training loop.
 
     Arguments:
         model_name: The name of the model to pretrain. Choose from names in ``litgpt.config``. Use "list" to list the supported models.
         model_config: A ``SafeMoEConfig`` object to define the model architecture.
-        out_dir: Directory in which to save checkpoints and logs.
+        out_dir: Directory in which to save checkpoints and logs. If omitted, derive from the CLI config filename.
         precision: The precision to use for training.
         initial_checkpoint_dir: Optional path to a checkpoint directory to initialize the model from.
         resume: Path to a checkpoint directory to resume from, or ``True`` to resume from the latest checkpoint.
-        data: A ``MultiDataLoader`` providing D_std, D_harmful, D_unlabeled loaders.
+        data: A ``SafeDataModule`` providing D_std, D_harmful, D_unlabeled loaders.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
         eval: Evaluation-related arguments.
         optimizer: An optimizer name (such as "AdamW") or config.
@@ -301,6 +412,10 @@ def setup(
         upsample_std: Sampling weight for D_std split. Required.
         upsample_harmful: Sampling weight for D_harmful split. Required.
         upsample_unlabeled: Sampling weight for D_unlabeled split. Required.
+        base_checkpoint: Base checkpoint used to derive a warmup surgery checkpoint.
+        num_harmful_experts: Count of harmful experts for warmup auto-surgery.
+        num_harmful_attn_heads: Count of harmful attention heads for warmup auto-surgery.
+        epsilon: Noise scale for warmup auto-surgery.
     """
     # SGTM: validate required upsample weights — no silent defaults
     if any(w is None for w in [upsample_std, upsample_harmful, upsample_unlabeled]):
@@ -316,6 +431,18 @@ def setup(
 
     if initial_checkpoint_dir is not None:
         initial_checkpoint_dir = extend_checkpoint_dir(initial_checkpoint_dir)
+    if base_checkpoint is not None:
+        base_checkpoint = extend_checkpoint_dir(base_checkpoint)
+
+    initial_checkpoint_dir = maybe_prepare_warmup_checkpoint(
+        stage=stage,
+        initial_checkpoint_dir=initial_checkpoint_dir,
+        base_checkpoint=base_checkpoint,
+        num_harmful_experts=num_harmful_experts,
+        num_harmful_attn_heads=num_harmful_attn_heads,
+        seed=seed,
+        epsilon=epsilon,
+    )
 
     if tokenizer_dir is not None:
         tokenizer_dir = extend_checkpoint_dir(tokenizer_dir)
@@ -331,12 +458,12 @@ def setup(
 
     hparams = capture_hparams()
     if data is None:
-        raise ValueError("data (MultiDataLoader) is required for SGTM training")
+        raise ValueError("data (SafeDataModule) is required for SGTM training")
 
     config = ensure_safemoe_config(model_config)
     precision = precision or get_default_supported_precision(training=True)
     devices = parse_devices(devices)
-    out_dir = init_out_dir(out_dir)
+    out_dir = resolve_out_dir(out_dir)
     tokenizer = Tokenizer(tokenizer_dir) if tokenizer_dir is not None else None
 
     logger = choose_logger(
@@ -400,7 +527,7 @@ def main(
     initial_checkpoint_dir: Optional[Path],
     resume: Union[bool, Literal["auto"], Path],
     config: SafeMoEConfig,
-    data: MultiDataLoader,
+    data: SafeDataModule,
     out_dir: Path,
     tokenizer_dir: Optional[Path],
     tokenizer: Optional[Tokenizer],
@@ -408,7 +535,6 @@ def main(
     eval: EvalArgs,
     optimizer: Union[str, Dict],
     num_nodes: int = 1,
-    # SGTM: upsample weights passed from setup()
     upsample_std: float = 1.0,
     upsample_harmful: float = 1.0,
     upsample_unlabeled: float = 1.0,
@@ -559,7 +685,7 @@ def main(
         out_dir / "final" / "lit_model.pth",
     )
     if stage == "warmup" and fabric.global_rank == 0:
-        fabric.print("Warmup training complete. Run warmup acceptance separately against:")
+        fabric.print("Warmup training complete. Evaluate these checkpoints separately if needed:")
         fabric.print(f"  pre:  {initial_checkpoint_dir}")
         fabric.print(f"  post: {out_dir / 'final'}")
 
@@ -586,8 +712,7 @@ def fit(
     fabric: L.Fabric,
     devices: int,
     state: dict,
-    # SGTM: MultiDataLoader replaces single train_dataloader
-    data: MultiDataLoader,
+    data: SafeDataModule,
     val_dataloader: DataLoader,
     out_dir: Path,
     tokenizer_dir: Optional[Path],
@@ -647,7 +772,7 @@ def fit(
     initial_iter = state["iter_num"]
 
     # SGTM: three split iterators replace single CycleIterator (Pattern 1)
-    active_labels = active_split_labels(stage)
+    active_labels = [l for l in active_split_labels(stage) if l in data._loaders]
     split_iters = {label: CycleIterator(data.get_loader(label)) for label in active_labels}
     split_weights = {
         "D_std": upsample_std,
@@ -925,17 +1050,27 @@ def validate(
         fabric.print("Validating ...")
     model.eval()
 
-    losses = []
-    for k, batch in enumerate(val_dataloader):
-        if k >= max_iters:
-            break
-        input_ids = batch[:, 0 : model.max_seq_length].contiguous().long().to(fabric.device)
-        targets = batch[:, 1 : (model.max_seq_length + 1)].contiguous().long().to(fabric.device)
-        logits = model(input_ids)
-        loss = chunked_cross_entropy(logits, targets)
-        losses.append(loss)
+    # Override default dtype so the Fabric HalfPrecision plugin's convert_output
+    # performs a bf16→bf16 no-op rather than a bf16→fp32 copy that would OOM on
+    # large-vocabulary models (e.g. Qwen ~152k vocab, ~46 GB logits in bf16).
+    prev_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
+    total_loss = 0.0
+    count = 0
+    try:
+        for k, batch in enumerate(val_dataloader):
+            if k >= max_iters:
+                break
+            input_ids = batch[:, 0 : model.max_seq_length].contiguous().long().to(fabric.device)
+            targets = batch[:, 1 : (model.max_seq_length + 1)].contiguous().long().to(fabric.device)
+            logits = model(input_ids)
+            loss = chunked_cross_entropy(logits, targets)
+            total_loss += loss.item()
+            count += 1
+    finally:
+        torch.set_default_dtype(prev_dtype)
 
-    val_loss = torch.stack(losses).mean()
+    val_loss = torch.tensor(total_loss / max(count, 1), device=fabric.device)
     model.train()
     fabric.barrier()
     return val_loss
@@ -947,7 +1082,7 @@ def validate(
 
 def get_dataloaders(
     fabric: L.Fabric,
-    data: MultiDataLoader,
+    data: SafeDataModule,
     tokenizer: Optional[Tokenizer],
     train: TrainArgs,
     block_size: int,

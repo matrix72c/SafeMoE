@@ -5,6 +5,10 @@ num_nodes: 1
 seed: 42
 logger_name: tensorboard
 stage: warmup
+base_checkpoint: checkpoints/Qwen3-30B-A3B-Base
+num_harmful_experts: 8
+num_harmful_attn_heads: 4
+epsilon: 1.0e-5
 warmup_routing_loss_weight: 0.1
 warmup_harmful_mass_floor: 0.6
 warmup_std_mass_ceiling: 0.4
@@ -22,19 +26,28 @@ train:
   lr_warmup_steps: 0
 
 eval:
-  interval: 999999
+  interval: 1
   max_iters: 1
   initial_validation: false
   final_validation: false
 
 data:
-  class_path: safemoe.data.datamodule.MultiDataLoader
+  class_path: safemoe.data.datamodule.SafeDataModule
   init_args:
     cache_dir: data/.cache
-    x: 0
-    y: 25
     seed: 42
     num_workers: 4
+    datasets:
+      openwebtext_std:
+        path: data/openwebtext
+        text_column: text
+        role: std
+        label_ratio: 0.75
+      openwebtext_harmful:
+        path: data/openwebtext_harmful
+        text_column: text
+        role: harmful
+        label_ratio: 1.0
 
 upsample_std: 1.0
 upsample_harmful: 1.0

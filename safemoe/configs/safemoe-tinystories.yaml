@@ -1,5 +1,4 @@
 # safemoe/configs/safemoe-tinystories.yaml
-# Small TinyStories MoE experiment config for CPU-only unit tests.
 # Based on config_hub/pretrain/tinystories.yaml (stories15M) with MoE fields added.
 # Follows litgpt YAML structure: model_name + model_config: nesting, train: nesting.
 
@@ -42,16 +41,24 @@ train:
   log_interval: 100
   max_tokens: 300000000
 
-# Data module — MultiDataLoader instantiated via jsonargparse class_path syntax.
-# Adjust cache_dir, x, y to match your data preparation settings.
+# Data module — SafeDataModule instantiated via jsonargparse class_path syntax.
 data:
-  class_path: safemoe.data.datamodule.MultiDataLoader
+  class_path: safemoe.data.datamodule.SafeDataModule
   init_args:
     cache_dir: data/.cache
-    x: 0
-    y: 25
     seed: 42
     num_workers: 8
+    datasets:
+      tinystories_en:
+        path: data/multilingual-tinystories/en
+        text_column: text
+        role: std
+        label_ratio: 0.25
+      tinystories_es:
+        path: data/multilingual-tinystories/es
+        text_column: text
+        role: harmful
+        label_ratio: 1.0
 
 # SGTM training loop fields (Phase 3) — top-level setup() params:
 upsample_std: 1

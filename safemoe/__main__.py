@@ -4,7 +4,7 @@ Usage:
     python -m safemoe pretrain --help
     python -m safemoe pretrain --config safemoe/configs/safemoe-tinystories.yaml
     python -m safemoe ablate <ckpt_dir>
-    python -m safemoe evaluate <ckpt_dir> [--ablated <path>] [--routing]
+    python -m safemoe evaluate <ckpt_dir> [--ablated <path>] [--routing/--no-routing]
     python -m safemoe surgery --help
 """
 from jsonargparse import CLI

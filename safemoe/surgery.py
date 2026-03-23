@@ -80,7 +80,7 @@ def _format_epsilon(epsilon: float) -> str:
     return f"{epsilon:.0e}"
 
 
-def _build_output_dir(init_checkpoint: Path, config: SafeMoEConfig, payload: dict[str, object]) -> Path:
+def _build_output_dir(base_checkpoint: Path, config: SafeMoEConfig, payload: dict[str, object]) -> Path:
     dirname = (
         f"{config.name}"
         f"-e{payload['num_harmful_experts']}"
@@ -88,7 +88,40 @@ def _build_output_dir(init_checkpoint: Path, config: SafeMoEConfig, payload: dic
         f"-seed{payload['seed']}"
         f"-eps{_format_epsilon(payload['epsilon'])}"
     )
-    return init_checkpoint.parent / dirname
+    return base_checkpoint.parent / dirname
+
+
+def _reuse_existing_output(final_output_dir: Path, payload: dict[str, object]) -> Path:
+    required_files = (
+        final_output_dir / "lit_model.pth",
+        final_output_dir / "model_config.yaml",
+        final_output_dir / "surgery_metadata.json",
+    )
+    missing_files = [path for path in required_files if not path.exists()]
+    if missing_files:
+        missing = ", ".join(str(path) for path in missing_files)
+        raise FileExistsError(
+            f"Existing surgery output is incomplete at {final_output_dir}: missing {missing}"
+        )
+
+    metadata = json.loads((final_output_dir / "surgery_metadata.json").read_text())
+    expected_pairs = {
+        "base_checkpoint": str(Path(payload["base_checkpoint"]).resolve()),
+        "num_harmful_experts": payload["num_harmful_experts"],
+        "num_harmful_attn_heads": payload["num_harmful_attn_heads"],
+        "seed": payload["seed"],
+        "epsilon": payload["epsilon"],
+    }
+    mismatches = {
+        key: (metadata.get(key), expected)
+        for key, expected in expected_pairs.items()
+        if metadata.get(key) != expected
+    }
+    if mismatches:
+        raise FileExistsError(
+            f"Existing surgery output at {final_output_dir} does not match requested parameters: {mismatches}"
+        )
+    return final_output_dir
 
 
 def _sample_targets(total: int, count: int, *, rng: random.Random, label: str) -> list[int]:
@@ -106,15 +139,15 @@ def _sample_sources(total: int, targets: list[int], *, rng: random.Random) -> li
 
 def setup(
     *,
-    init_checkpoint: Path,
+    base_checkpoint: Path,
     num_harmful_experts: int,
     num_harmful_attn_heads: int,
     seed: int,
     epsilon: float,
 ) -> Path:
-    init_checkpoint = Path(init_checkpoint)
-    config_path = init_checkpoint / "model_config.yaml"
-    checkpoint_path = init_checkpoint / "lit_model.pth"
+    base_checkpoint = Path(base_checkpoint)
+    config_path = base_checkpoint / "model_config.yaml"
+    checkpoint_path = base_checkpoint / "lit_model.pth"
     if not config_path.exists():
         raise FileNotFoundError(f"Missing config file: {config_path}")
     if not checkpoint_path.exists():
@@ -136,7 +169,7 @@ def setup(
     )
 
     payload = {
-        "base_checkpoint": str(init_checkpoint.resolve()),
+        "base_checkpoint": str(base_checkpoint.resolve()),
         "base_checkpoint_name": config.name,
         "num_harmful_experts": num_harmful_experts,
         "num_harmful_attn_heads": num_harmful_attn_heads,
@@ -145,11 +178,11 @@ def setup(
         "harmful_expert_indices": harmful_expert_indices,
         "harmful_attn_heads": harmful_attn_heads,
     }
-    final_output_dir = _build_output_dir(init_checkpoint, config, payload)
+    final_output_dir = _build_output_dir(base_checkpoint, config, payload)
     staging_output_dir = final_output_dir.with_name(f"{final_output_dir.name}.tmp")
 
     if final_output_dir.exists():
-        raise FileExistsError(f"Refusing to overwrite existing surgery output: {final_output_dir}")
+        return _reuse_existing_output(final_output_dir, payload)
     if staging_output_dir.exists():
         shutil.rmtree(staging_output_dir)
     staging_output_dir.mkdir(parents=True, exist_ok=False)
@@ -215,7 +248,7 @@ def setup(
     (staging_output_dir / "surgery_metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
 
     for sidecar_name in SIDECAR_FILES:
-        sidecar_path = init_checkpoint / sidecar_name
+        sidecar_path = base_checkpoint / sidecar_name
         if sidecar_path.exists():
             shutil.copy2(sidecar_path, staging_output_dir / sidecar_name)
 
