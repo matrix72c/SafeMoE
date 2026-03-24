@@ -425,9 +425,12 @@ def _teardown_eval_session(session: Optional["_EvalSession"]) -> None:
             shutdown()
 
     strategy = getattr(session.fabric, "strategy", None)
-    teardown = getattr(strategy, "teardown", None)
-    if callable(teardown):
-        teardown()
+    # Fabric FSDP teardown reaches unsupported checkpoint_io, so eval relies on
+    # explicit process-group teardown instead.
+    if not isinstance(strategy, FSDPStrategy):
+        teardown = getattr(strategy, "teardown", None)
+        if callable(teardown):
+            teardown()
 
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
