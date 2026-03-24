@@ -376,7 +376,7 @@ def setup(
     devices: Union[int, str] = "auto",
     num_nodes: int = 1,
     tokenizer_dir: Optional[Path] = None,
-    logger_name: LoggerChoice = "tensorboard",
+    logger_name: LoggerChoice = "wandb",
     seed: int = 42,
     # SGTM: upsample weights for 3-path split sampling — required, no defaults
     upsample_std: Optional[float] = None,
