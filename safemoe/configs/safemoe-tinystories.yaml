@@ -4,6 +4,7 @@
 
 # The name of the model. Maps to setup(model_name=...).
 model_name: safemoe-tinystories
+run_name: safemoe-tinystories
 
 tokenizer_dir: checkpoints/Qwen3-30B-A3B-Base
 

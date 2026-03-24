@@ -17,7 +17,7 @@ from lightning.fabric.strategies import FSDPStrategy
 from torch.utils.data import DataLoader
 
 from litgpt.model import GPT, Block
-from litgpt.utils import check_valid_checkpoint_dir
+from litgpt.utils import check_valid_checkpoint_dir, parse_devices
 from safemoe.config import SafeMoEConfig
 from safemoe.observability import RoutingObservabilityCollector
 from safemoe.pretrain import validate
@@ -81,7 +81,7 @@ def _merge_dicts(existing: dict[str, Any], updates: dict[str, Any]) -> dict[str,
     return merged
 
 
-def _checkpoint_key(ckpt_dir: Path, results_root: Path) -> str:
+def _checkpoint_relpath(ckpt_dir: Path, results_root: Path) -> str:
     ckpt_dir = Path(ckpt_dir).resolve()
     results_root = Path(results_root).resolve()
     try:
@@ -90,11 +90,35 @@ def _checkpoint_key(ckpt_dir: Path, results_root: Path) -> str:
         return ckpt_dir.name
 
 
+def _load_checkpoint_run_name(ckpt_dir: Path) -> Optional[str]:
+    hyperparameters_path = Path(ckpt_dir) / "hyperparameters.yaml"
+    if not hyperparameters_path.is_file():
+        return None
+    payload = yaml.safe_load(hyperparameters_path.read_text())
+    if not isinstance(payload, dict):
+        return None
+    run_name = payload.get("run_name")
+    if isinstance(run_name, str) and run_name:
+        return run_name
+    return None
+
+
+def _checkpoint_key(ckpt_dir: Path, results_root: Path) -> str:
+    ckpt_dir = Path(ckpt_dir).resolve()
+    checkpoint_run_name = _load_checkpoint_run_name(ckpt_dir)
+    if checkpoint_run_name:
+        return checkpoint_run_name
+    return _checkpoint_relpath(ckpt_dir, results_root)
+
+
 def _checkpoint_reference(ckpt_dir: Path, results_root: Optional[Path] = None) -> str:
     resolved = Path(ckpt_dir).resolve()
+    checkpoint_run_name = _load_checkpoint_run_name(resolved)
+    if checkpoint_run_name:
+        return checkpoint_run_name
     if results_root is None:
         return str(resolved)
-    return _checkpoint_key(resolved, results_root)
+    return _checkpoint_relpath(resolved, results_root)
 
 
 def _write_checkpoint_metrics(ckpt_dir: Path, metrics: dict[str, Any]) -> Path:
@@ -109,13 +133,15 @@ def _write_checkpoint_metrics(ckpt_dir: Path, metrics: dict[str, Any]) -> Path:
     if existing_record and not isinstance(existing_record, dict):
         raise TypeError(f"Expected mapping for results record {record_key!r}")
 
+    checkpoint_relpath = _checkpoint_relpath(ckpt_dir, results_root)
+    checkpoint_run_name = _load_checkpoint_run_name(ckpt_dir)
     key_parts = Path(record_key).parts
     record = _merge_dicts(
         {
             'checkpoint_dir': str(ckpt_dir.resolve()),
-            'checkpoint_relpath': record_key,
+            'checkpoint_relpath': checkpoint_relpath,
             'checkpoint_name': ckpt_dir.name,
-            'run_name': key_parts[0] if key_parts else ckpt_dir.name,
+            'run_name': checkpoint_run_name or (key_parts[0] if key_parts else ckpt_dir.name),
             'metrics': {},
         },
         existing_record,
@@ -743,8 +769,12 @@ def evaluate_routing(
 def evaluate_cli(
     original: Path,
     ablated: Optional[Path] = None,
+    accelerator: str = "auto",
+    devices: int | str = "auto",
+    num_nodes: int = 1,
+    precision: Optional[str] = None,
 ) -> None:
-    """CLI: python -m safemoe evaluate <ckpt_dir> [--ablated <path>].
+    """CLI: python -m safemoe evaluate <ckpt_dir> [--ablated <path>] [--devices auto].
 
     All supported evaluation metrics are always computed and persisted.
     When *ablated* is omitted the ablated checkpoint is auto-located at
@@ -753,6 +783,7 @@ def evaluate_cli(
     """
     original = Path(original)
     original = _ensure_surgery_checkpoint(original)
+    devices = parse_devices(devices)
 
     if ablated is not None:
         ablated = Path(ablated)
@@ -767,12 +798,24 @@ def evaluate_cli(
     original_session: Optional[_EvalSession] = None
     ablated_session: Optional[_EvalSession] = None
     try:
-        original_session, original_metrics = _evaluate_checkpoint(original)
+        original_session, original_metrics = _evaluate_checkpoint(
+            original,
+            accelerator=accelerator,
+            devices=devices,
+            num_nodes=num_nodes,
+            precision=precision,
+        )
         ablated_metrics: Optional[dict[str, dict[str, float]]] = None
         results_path: Optional[Path] = None
 
         if ablated is not None:
-            ablated_session, ablated_metrics = _evaluate_checkpoint(ablated)
+            ablated_session, ablated_metrics = _evaluate_checkpoint(
+                ablated,
+                accelerator=accelerator,
+                devices=devices,
+                num_nodes=num_nodes,
+                precision=precision,
+            )
             results_path = _persist_combined_metrics(
                 original_session,
                 original,

@@ -4,34 +4,36 @@ devices: 4
 num_nodes: 1
 seed: 42
 logger_name: wandb
+run_name: safemoe-qwen-warmup
 log:
   project: safemoe
+
 stage: warmup
 base_checkpoint: checkpoints/Qwen3-30B-A3B-Base
 num_harmful_experts: 8
 num_harmful_attn_heads: 4
 epsilon: 1.0e-5
 warmup_routing_loss_weight: 0.1
-warmup_harmful_mass_floor: 0.6
-warmup_std_mass_ceiling: 0.4
+warmup_harmful_mass_floor: 0.7
+warmup_std_mass_ceiling: 0.1
 
 train:
   micro_batch_size: 1
   global_batch_size: 4
-  save_interval: null
-  log_interval: 1
-  max_tokens: 4096
-  max_steps: 1
+  save_interval: 1000
+  log_interval: 20
+  max_tokens: 20971520
+  max_steps: 5000
   max_seq_length: 1024
   max_norm: 1.0
   min_lr: 4.0e-05
-  lr_warmup_steps: 0
+  lr_warmup_steps: 200
 
 eval:
-  interval: 1
-  max_iters: 1
-  initial_validation: false
-  final_validation: false
+  interval: 500
+  max_iters: 50
+  initial_validation: true
+  final_validation: true
 
 data:
   class_path: safemoe.data.datamodule.SafeDataModule

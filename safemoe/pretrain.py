@@ -17,6 +17,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple, Union
 
 import lightning as L
 import torch
+import yaml
 import torch.nn as nn
 import torch.nn.functional as F
 from lightning.fabric.strategies import FSDPStrategy
@@ -76,9 +77,11 @@ class WarmupSurgeryArgs(NamedTuple):
     epsilon: float
 
 
-def resolve_out_dir(out_dir: Optional[Path]) -> Path:
+def resolve_out_dir(out_dir: Optional[Path], run_name: Optional[str] = None) -> Path:
     if out_dir is not None:
         return init_out_dir(out_dir)
+    if run_name:
+        return init_out_dir(Path("checkpoints") / run_name)
     config_path = _config_path_from_argv(sys.argv[1:])
     if config_path is not None:
         return init_out_dir(Path("checkpoints") / config_path.stem)
@@ -346,6 +349,11 @@ def ensure_safemoe_config(config: Union[Config, SafeMoEConfig]) -> SafeMoEConfig
     return SafeMoEConfig(**asdict(config))
 
 
+def load_safemoe_config_from_checkpoint(ckpt_dir: Path) -> SafeMoEConfig:
+    raw = yaml.safe_load((ckpt_dir / "model_config.yaml").read_text())
+    return SafeMoEConfig(**{key: value for key, value in raw.items() if not isinstance(value, dict)})
+
+
 # ---------------------------------------------------------------------------
 # setup() — SGTM entry point
 # ---------------------------------------------------------------------------
@@ -355,6 +363,7 @@ def setup(
     # SGTM: SafeMoEConfig instead of litgpt.Config
     model_config: Optional[SafeMoEConfig] = None,
     out_dir: Optional[Path] = None,
+    run_name: Optional[str] = None,
     precision: Literal["bf16-true", "bf16-mixed", "32-true", None] = None,
     initial_checkpoint_dir: Optional[Path] = None,
     resume: Union[bool, Literal["auto"], Path] = False,
@@ -396,7 +405,8 @@ def setup(
     Arguments:
         model_name: The name of the model to pretrain. Choose from names in ``litgpt.config``. Use "list" to list the supported models.
         model_config: A ``SafeMoEConfig`` object to define the model architecture.
-        out_dir: Directory in which to save checkpoints and logs. If omitted, derive from the CLI config filename.
+        out_dir: Directory in which to save checkpoints and logs. If omitted, derive from run_name or the CLI config filename.
+        run_name: Optional experiment name used as the default checkpoint directory name and logger run name.
         precision: The precision to use for training.
         initial_checkpoint_dir: Optional path to a checkpoint directory to initialize the model from.
         resume: Path to a checkpoint directory to resume from, or ``True`` to resume from the latest checkpoint.
@@ -461,10 +471,16 @@ def setup(
         raise ValueError("data (SafeDataModule) is required for SGTM training")
 
     config = ensure_safemoe_config(model_config)
+    if initial_checkpoint_dir is not None:
+        config = load_safemoe_config_from_checkpoint(initial_checkpoint_dir)
     precision = precision or get_default_supported_precision(training=True)
     devices = parse_devices(devices)
-    out_dir = resolve_out_dir(out_dir)
+    out_dir = resolve_out_dir(out_dir, run_name=run_name)
     tokenizer = Tokenizer(tokenizer_dir) if tokenizer_dir is not None else None
+
+    log_args = asdict(log)
+    if run_name and not log_args.get("run"):
+        log_args["run"] = run_name
 
     logger = choose_logger(
         logger_name,
@@ -472,7 +488,7 @@ def setup(
         name=f"pretrain-{config.name}",
         resume=bool(resume),
         log_interval=train.log_interval,
-        log_args=asdict(log),
+        log_args=log_args,
     )
 
     if devices * num_nodes > 1:
