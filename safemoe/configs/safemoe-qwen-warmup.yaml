@@ -3,7 +3,9 @@ tokenizer_dir: checkpoints/Qwen3-30B-A3B-Base
 devices: 4
 num_nodes: 1
 seed: 42
-logger_name: tensorboard
+logger_name: wandb
+log:
+  project: safemoe
 stage: warmup
 base_checkpoint: checkpoints/Qwen3-30B-A3B-Base
 num_harmful_experts: 8
@@ -38,13 +40,13 @@ data:
     seed: 42
     num_workers: 4
     datasets:
-      openwebtext_std:
-        path: data/openwebtext
+      tinystories_en:
+        path: data/multilingual-tinystories/en
         text_column: text
         role: std
-        label_ratio: 0.75
-      openwebtext_harmful:
-        path: data/openwebtext_harmful
+        label_ratio: 0.25
+      tinystories_es:
+        path: data/multilingual-tinystories/es
         text_column: text
         role: harmful
         label_ratio: 1.0
