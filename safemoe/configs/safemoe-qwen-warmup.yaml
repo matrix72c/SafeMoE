@@ -55,4 +55,4 @@ data:
 
 upsample_std: 1.0
 upsample_harmful: 1.0
-upsample_unlabeled: 0.0
+upsample_unlabeled: 1.0
