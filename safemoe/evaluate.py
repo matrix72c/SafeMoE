@@ -1,5 +1,4 @@
-"""safemoe/evaluate.py — Per-split perplexity evaluation and routing attribution
-analysis (EVAL-01, EVAL-02)."""
+"""safemoe/evaluate.py — Full checkpoint evaluation and routing analysis"""
 
 import json
 import math
@@ -390,6 +389,25 @@ def _prepare_eval_loader(fabric: L.Fabric, loader: object) -> object:
 
 
 
+def _teardown_eval_session(session: Optional["_EvalSession"]) -> None:
+    if session is None:
+        return
+
+    for loader in session.val_loaders.values():
+        shutdown = getattr(loader, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
+
+    strategy = getattr(session.fabric, "strategy", None)
+    teardown = getattr(strategy, "teardown", None)
+    if callable(teardown):
+        teardown()
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+
+
+
 def _ensure_surgery_checkpoint(ckpt_dir: Path) -> Path:
     """If *ckpt_dir* is a base checkpoint (no harmful experts), run surgery using
     parameters stored in its ``hyperparameters.yaml`` and return the surgery
@@ -535,8 +553,6 @@ def _evaluate_checkpoint(
     devices: int | str = 1,
     num_nodes: int = 1,
     precision: Optional[str] = None,
-    include_perplexity: bool = True,
-    include_routing: bool = False,
 ) -> tuple[_EvalSession, dict[str, dict[str, float]]]:
     session = _create_eval_session(
         ckpt_dir,
@@ -546,11 +562,10 @@ def _evaluate_checkpoint(
         num_nodes=num_nodes,
         precision=precision,
     )
-    checkpoint_metrics: dict[str, dict[str, float]] = {}
-    if include_perplexity:
-        checkpoint_metrics["perplexity"] = _compute_perplexity_metrics(session)
-    if include_routing:
-        checkpoint_metrics["routing"] = _compute_routing_metrics(session)
+    checkpoint_metrics: dict[str, dict[str, float]] = {
+        "perplexity": _compute_perplexity_metrics(session),
+        "routing": _compute_routing_metrics(session),
+    }
     return session, checkpoint_metrics
 
 
@@ -564,55 +579,90 @@ def _persist_checkpoint_metrics(
     return _write_checkpoint_metrics(ckpt_dir, checkpoint_metrics)
 
 
-def _persist_perplexity_comparison(
+def _build_combined_metrics_record(
+    original_ckpt_dir: Path,
+    original_metrics: dict[str, dict[str, float]],
+    ablated_ckpt_dir: Optional[Path] = None,
+    ablated_metrics: Optional[dict[str, dict[str, float]]] = None,
+) -> dict[str, Any]:
+    combined: dict[str, Any] = {
+        "original": original_metrics,
+    }
+    if ablated_ckpt_dir is None or ablated_metrics is None:
+        return combined
+
+    comparison: dict[str, dict[str, float]] = {}
+    for metric_group, values in original_metrics.items():
+        other_values = ablated_metrics.get(metric_group, {})
+        comparison[metric_group] = {
+            key: other_values[key] - value
+            for key, value in values.items()
+            if key in other_values
+        }
+
+    combined["ablated"] = {
+        "checkpoint": _checkpoint_reference(ablated_ckpt_dir, _find_results_root(original_ckpt_dir)),
+        "metrics": ablated_metrics,
+    }
+    combined["delta_other_minus_self"] = comparison
+    return combined
+
+
+def _persist_combined_metrics(
     session: _EvalSession,
     original_ckpt_dir: Path,
-    ablated_ckpt_dir: Path,
-    delta: dict[str, float],
+    original_metrics: dict[str, dict[str, float]],
+    ablated_ckpt_dir: Optional[Path] = None,
+    ablated_metrics: Optional[dict[str, dict[str, float]]] = None,
 ) -> Optional[Path]:
     if session.fabric.global_rank != 0:
         return None
     return _write_checkpoint_metrics(
         original_ckpt_dir,
-        {
-            "perplexity_comparison": {
-                _checkpoint_reference(ablated_ckpt_dir, _find_results_root(original_ckpt_dir)): {
-                    "delta_other_minus_self": delta,
-                }
-            }
-        },
+        _build_combined_metrics_record(
+            original_ckpt_dir,
+            original_metrics,
+            ablated_ckpt_dir=ablated_ckpt_dir,
+            ablated_metrics=ablated_metrics,
+        ),
     )
 
 
-def _print_perplexity_result(result: dict[str, dict[str, float]]) -> None:
-    if "ablated" in result:
-        print(f"\n{'Split':<14} {'Original':>10} {'Ablated':>10} {'Delta':>10}")
-        print("-" * 48)
-        for split in ["D_std", "D_harmful"]:
-            key = f"val_ppl_{split}"
-            delta = result["delta"][key]
+def _print_summary_table(
+    original_metrics: dict[str, dict[str, float]],
+    ablated_metrics: Optional[dict[str, dict[str, float]]] = None,
+) -> None:
+    has_ablated = ablated_metrics is not None
+    if has_ablated:
+        print(f"\n{'Metric':<16} {'Split':<14} {'Original':>12} {'Ablated':>12} {'Delta':>12}")
+        print("-" * 70)
+    else:
+        print(f"\n{'Metric':<16} {'Split':<14} {'Original':>12}")
+        print("-" * 44)
+
+    rows = [
+        ("Perplexity", "D_std", "perplexity", "val_ppl_D_std", 2),
+        ("Perplexity", "D_harmful", "perplexity", "val_ppl_D_harmful", 2),
+        ("Routing frac", "D_std", "routing", "routing_harmful_frac_D_std", 4),
+        ("Routing frac", "D_harmful", "routing", "routing_harmful_frac_D_harmful", 4),
+        ("Routing margin", "overall", "routing", "routing_margin", 4),
+    ]
+
+    for label, split, group, key, digits in rows:
+        original_value = original_metrics[group][key]
+        if has_ablated:
+            ablated_value = ablated_metrics[group][key]
+            delta = ablated_value - original_value
             sign = "+" if delta >= 0 else ""
-            print(f"{split:<14} {result['original'][key]:>10.2f} {result['ablated'][key]:>10.2f} {sign}{delta:>9.2f}")
-        return
-
-    print(f"\n{'Split':<14} {'Original':>10}")
-    print("-" * 26)
-    for split in ["D_std", "D_harmful"]:
-        key = f"val_ppl_{split}"
-        print(f"{split:<14} {result['original'][key]:>10.2f}")
+            print(
+                f"{label:<16} {split:<14} "
+                f"{original_value:>12.{digits}f} {ablated_value:>12.{digits}f} {sign}{delta:>11.{digits}f}"
+            )
+        else:
+            print(f"{label:<16} {split:<14} {original_value:>12.{digits}f}")
 
 
-def _print_routing_metrics(routing_metrics: dict[str, float], title: Optional[str] = None) -> None:
-    if title is not None:
-        print(f"\n{title}")
-    print(f"\n{'Split':<14} {'Harmful Expert Frac':>20}")
-    print("-" * 36)
-    for split in ["D_std", "D_harmful"]:
-        key = f"routing_harmful_frac_{split}"
-        print(f"{split:<14} {routing_metrics[key]:>20.4f}")
-
-
-def evaluate_perplexity(
+def evaluate_checkpoint(
     original_ckpt_dir: Path,
     ablated_ckpt_dir: Optional[Path] = None,
     data_mock=None,
@@ -621,50 +671,58 @@ def evaluate_perplexity(
     num_nodes: int = 1,
     precision: Optional[str] = None,
 ) -> dict:
-    """Evaluate perplexity and persist metrics to checkpoints/results.json."""
+    """Evaluate all checkpoint metrics and persist them to checkpoints/results.json."""
     original_ckpt_dir = Path(original_ckpt_dir)
     ablated_ckpt_dir = Path(ablated_ckpt_dir) if ablated_ckpt_dir is not None else None
 
-    original_session, original_metrics = _evaluate_checkpoint(
-        original_ckpt_dir,
-        data_mock=data_mock,
-        accelerator=accelerator,
-        devices=devices,
-        num_nodes=num_nodes,
-        precision=precision,
-        include_perplexity=True,
-        include_routing=False,
-    )
-    result: dict[str, Any] = {"original": original_metrics["perplexity"]}
-    results_path = _persist_checkpoint_metrics(original_session, original_ckpt_dir, original_metrics)
-
-    if ablated_ckpt_dir is not None:
-        ablated_session, ablated_metrics = _evaluate_checkpoint(
-            ablated_ckpt_dir,
+    original_session: Optional[_EvalSession] = None
+    ablated_session: Optional[_EvalSession] = None
+    try:
+        original_session, original_metrics = _evaluate_checkpoint(
+            original_ckpt_dir,
             data_mock=data_mock,
             accelerator=accelerator,
             devices=devices,
             num_nodes=num_nodes,
             precision=precision,
-            include_perplexity=True,
-            include_routing=False,
         )
-        delta = {
-            key: ablated_metrics["perplexity"][key] - original_metrics["perplexity"][key]
-            for key in original_metrics["perplexity"]
-        }
-        result["ablated"] = ablated_metrics["perplexity"]
-        result["delta"] = delta
-        _persist_checkpoint_metrics(ablated_session, ablated_ckpt_dir, ablated_metrics)
-        results_path = _persist_perplexity_comparison(original_session, original_ckpt_dir, ablated_ckpt_dir, delta) or results_path
+        ablated_metrics: Optional[dict[str, dict[str, float]]] = None
+        results_path: Optional[Path] = None
 
-    _print_perplexity_result(result)
-    if results_path is not None:
-        print(f"\nResults written to {results_path}")
-    return result
+        if ablated_ckpt_dir is not None:
+            ablated_session, ablated_metrics = _evaluate_checkpoint(
+                ablated_ckpt_dir,
+                data_mock=data_mock,
+                accelerator=accelerator,
+                devices=devices,
+                num_nodes=num_nodes,
+                precision=precision,
+            )
+            results_path = _persist_combined_metrics(
+                original_session,
+                original_ckpt_dir,
+                original_metrics,
+                ablated_ckpt_dir=ablated_ckpt_dir,
+                ablated_metrics=ablated_metrics,
+            )
+        else:
+            results_path = _persist_checkpoint_metrics(original_session, original_ckpt_dir, original_metrics)
+
+        _print_summary_table(original_metrics, ablated_metrics)
+        if results_path is not None:
+            print(f"\nResults written to {results_path}")
+        return _build_combined_metrics_record(
+            original_ckpt_dir,
+            original_metrics,
+            ablated_ckpt_dir=ablated_ckpt_dir,
+            ablated_metrics=ablated_metrics,
+        )
+    finally:
+        _teardown_eval_session(ablated_session)
+        _teardown_eval_session(original_session)
 
 
-def routing_attribution(
+def evaluate_routing(
     ckpt_dir: Path,
     data_mock=None,
     accelerator: str = "auto",
@@ -672,33 +730,35 @@ def routing_attribution(
     num_nodes: int = 1,
     precision: Optional[str] = None,
 ) -> dict:
-    """Collect routing metrics and persist them to checkpoints/results.json."""
+    """Evaluate routing metrics and persist the full checkpoint results."""
     ckpt_dir = Path(ckpt_dir)
-    session, checkpoint_metrics = _evaluate_checkpoint(
-        ckpt_dir,
-        data_mock=data_mock,
-        accelerator=accelerator,
-        devices=devices,
-        num_nodes=num_nodes,
-        precision=precision,
-        include_perplexity=False,
-        include_routing=True,
-    )
-    routing_metrics = checkpoint_metrics["routing"]
-    results_path = _persist_checkpoint_metrics(session, ckpt_dir, checkpoint_metrics)
-    _print_routing_metrics(routing_metrics)
-    if results_path is not None:
-        print(f"\nResults written to {results_path}")
-    return routing_metrics
+    session: Optional[_EvalSession] = None
+    try:
+        session, checkpoint_metrics = _evaluate_checkpoint(
+            ckpt_dir,
+            data_mock=data_mock,
+            accelerator=accelerator,
+            devices=devices,
+            num_nodes=num_nodes,
+            precision=precision,
+        )
+        routing_metrics = checkpoint_metrics["routing"]
+        results_path = _persist_checkpoint_metrics(session, ckpt_dir, checkpoint_metrics)
+        _print_summary_table(checkpoint_metrics)
+        if results_path is not None:
+            print(f"\nResults written to {results_path}")
+        return routing_metrics
+    finally:
+        _teardown_eval_session(session)
 
 
-def setup(
+def evaluate_cli(
     original: Path,
     ablated: Optional[Path] = None,
-    routing: bool = True,
 ) -> None:
-    """CLI: python -m safemoe evaluate <ckpt_dir> [--ablated <path>] [--routing].
+    """CLI: python -m safemoe evaluate <ckpt_dir> [--ablated <path>].
 
+    All supported evaluation metrics are always computed and persisted.
     When *ablated* is omitted the ablated checkpoint is auto-located at
     ``<ckpt_dir>/ablated/``.  If that directory has no ``lit_model.pth`` the
     ablation is run automatically before evaluation begins.
@@ -716,34 +776,29 @@ def setup(
             ablate(original)
         ablated = candidate
 
-    original_session, original_metrics = _evaluate_checkpoint(
-        original,
-        include_perplexity=True,
-        include_routing=routing,
-    )
-    results_path = _persist_checkpoint_metrics(original_session, original, original_metrics)
-    result: dict[str, Any] = {"original": original_metrics["perplexity"]}
+    original_session: Optional[_EvalSession] = None
+    ablated_session: Optional[_EvalSession] = None
+    try:
+        original_session, original_metrics = _evaluate_checkpoint(original)
+        ablated_metrics: Optional[dict[str, dict[str, float]]] = None
+        results_path: Optional[Path] = None
 
-    if ablated is not None:
-        ablated_session, ablated_metrics = _evaluate_checkpoint(
-            ablated,
-            include_perplexity=True,
-            include_routing=routing,
-        )
-        delta = {
-            key: ablated_metrics["perplexity"][key] - original_metrics["perplexity"][key]
-            for key in original_metrics["perplexity"]
-        }
-        result["ablated"] = ablated_metrics["perplexity"]
-        result["delta"] = delta
-        _persist_checkpoint_metrics(ablated_session, ablated, ablated_metrics)
-        results_path = _persist_perplexity_comparison(original_session, original, ablated, delta) or results_path
-        if routing:
-            _print_routing_metrics(original_metrics["routing"], title=f"Routing: {original}")
-            _print_routing_metrics(ablated_metrics["routing"], title=f"Routing: {ablated}")
-    elif routing:
-        _print_routing_metrics(original_metrics["routing"])
+        if ablated is not None:
+            ablated_session, ablated_metrics = _evaluate_checkpoint(ablated)
+            results_path = _persist_combined_metrics(
+                original_session,
+                original,
+                original_metrics,
+                ablated_ckpt_dir=ablated,
+                ablated_metrics=ablated_metrics,
+            )
+        else:
+            results_path = _persist_checkpoint_metrics(original_session, original, original_metrics)
 
-    _print_perplexity_result(result)
-    if results_path is not None:
-        print(f"\nResults written to {results_path}")
+        _print_summary_table(original_metrics, ablated_metrics)
+        if results_path is not None:
+            print(f"\nResults written to {results_path}")
+    finally:
+        _teardown_eval_session(ablated_session)
+        _teardown_eval_session(original_session)
+

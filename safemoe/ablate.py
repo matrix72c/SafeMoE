@@ -71,7 +71,10 @@ def ablate(ckpt_dir: Path) -> None:
     ablated_dir = ckpt_dir / "ablated"
     ablated_dir.mkdir(parents=True, exist_ok=True)
     torch.save({"model": model.state_dict()}, ablated_dir / "lit_model.pth")
-    shutil.copy(ckpt_dir / "model_config.yaml", ablated_dir / "model_config.yaml")
+    shutil.copy2(ckpt_dir / "model_config.yaml", ablated_dir / "model_config.yaml")
+    hyperparameters_path = ckpt_dir / "hyperparameters.yaml"
+    if hyperparameters_path.exists():
+        shutil.copy2(hyperparameters_path, ablated_dir / "hyperparameters.yaml")
 
     # Step 9: Save ablation manifest JSON
     manifest = {"zeroed_parameters": manifest_entries}
