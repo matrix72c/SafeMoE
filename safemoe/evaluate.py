@@ -591,20 +591,10 @@ def _build_combined_metrics_record(
     if ablated_ckpt_dir is None or ablated_metrics is None:
         return combined
 
-    comparison: dict[str, dict[str, float]] = {}
-    for metric_group, values in original_metrics.items():
-        other_values = ablated_metrics.get(metric_group, {})
-        comparison[metric_group] = {
-            key: other_values[key] - value
-            for key, value in values.items()
-            if key in other_values
-        }
-
     combined["ablated"] = {
         "checkpoint": _checkpoint_reference(ablated_ckpt_dir, _find_results_root(original_ckpt_dir)),
         "metrics": ablated_metrics,
     }
-    combined["delta_other_minus_self"] = comparison
     return combined
 
 
@@ -634,8 +624,8 @@ def _print_summary_table(
 ) -> None:
     has_ablated = ablated_metrics is not None
     if has_ablated:
-        print(f"\n{'Metric':<16} {'Split':<14} {'Original':>12} {'Ablated':>12} {'Delta':>12}")
-        print("-" * 70)
+        print(f"\n{'Metric':<16} {'Split':<14} {'Original':>12} {'Ablated':>12}")
+        print("-" * 57)
     else:
         print(f"\n{'Metric':<16} {'Split':<14} {'Original':>12}")
         print("-" * 44)
@@ -652,11 +642,9 @@ def _print_summary_table(
         original_value = original_metrics[group][key]
         if has_ablated:
             ablated_value = ablated_metrics[group][key]
-            delta = ablated_value - original_value
-            sign = "+" if delta >= 0 else ""
             print(
                 f"{label:<16} {split:<14} "
-                f"{original_value:>12.{digits}f} {ablated_value:>12.{digits}f} {sign}{delta:>11.{digits}f}"
+                f"{original_value:>12.{digits}f} {ablated_value:>12.{digits}f}"
             )
         else:
             print(f"{label:<16} {split:<14} {original_value:>12.{digits}f}")
