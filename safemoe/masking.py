@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 import re
-import types
 from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -43,7 +42,6 @@ import torch.nn as nn
 if TYPE_CHECKING:
     from safemoe.config import SafeMoEConfig
     from safemoe.interventions.manifest import InterventionManifest
-    from litgpt.model import CausalSelfAttention
 
 
 class HarmfulParamRegistry:
@@ -319,33 +317,6 @@ def write_registry_reports(
 
 
 # ---------------------------------------------------------------------------
-# Helper: forward wrapper stub for CausalSelfAttention (Phase 3 infrastructure)
-# ---------------------------------------------------------------------------
-
-
-def _wrap_attn_forward(attn: "CausalSelfAttention") -> None:
-    """Install a forward wrapper on a CausalSelfAttention instance.
-
-    This wrapper stub establishes the monkey-patch infrastructure needed for
-    Phase 3 attn-head activation masking.  The actual head-output zeroing
-    (``attn_out[:, head_idx, :, :] = 0`` before proj) is added in Plan 03-02
-    Task 1 via SafeCausalSelfAttention.
-
-    The ``_activation_masking_enabled`` flag toggled by
-    ``ActivationMasker.enable()/disable()`` is checked here; for now the
-    wrapper is a pass-through that preserves the original forward behaviour.
-    """
-    orig_forward = attn.forward  # stash the current bound method
-
-    def _masked_forward(self_attn, *args, **kwargs):  # type: ignore[no-untyped-def]
-        # Phase 03-02 replaces this with real head-output zeroing.
-        # For Plan 03-01 this is a transparent pass-through.
-        return orig_forward(*args, **kwargs)
-
-    attn.forward = types.MethodType(_masked_forward, attn)
-
-
-# ---------------------------------------------------------------------------
 # Maskers
 # ---------------------------------------------------------------------------
 
@@ -376,55 +347,37 @@ class GradientMasker:
 
         ``D_unlabeled`` updates all groups and therefore requires no masking.
         """
-        if split_label == "D_std":
-            for p in self._registry.parameters_by_type("theta_harmful"):
-                p.grad = None
-            for param, slices in self._registry._qkv_harmful_metadata:
-                if param.grad is not None:
-                    for s in slices:
-                        param.grad[s] = 0
-        elif split_label == "D_harmful":
-            for p in self._registry.parameters_by_type("theta_std"):
-                if id(p) not in self._qkv_param_ids:
-                    p.grad = None
-            for param, slices in self._registry._qkv_std_metadata:
-                if param.grad is not None:
-                    for s in slices:
-                        param.grad[s] = 0
-        elif split_label == "D_unlabeled":
-            return
-        else:
+        split_policies = {
+            "D_std": {
+                "clear_group": "theta_harmful",
+                "skip_qkv": False,
+                "qkv_metadata": self._registry._qkv_harmful_metadata,
+            },
+            "D_harmful": {
+                "clear_group": "theta_std",
+                "skip_qkv": True,
+                "qkv_metadata": self._registry._qkv_std_metadata,
+            },
+            "D_unlabeled": None,
+        }
+        if split_label not in split_policies:
             raise ValueError(f"Unknown split_label {split_label!r}")
+        policy = split_policies[split_label]
+        if policy is None:
+            return
+
+        for param in self._registry.parameters_by_type(policy["clear_group"]):
+            if policy["skip_qkv"] and id(param) in self._qkv_param_ids:
+                continue
+            param.grad = None
+        for param, slices in policy["qkv_metadata"]:
+            if param.grad is not None:
+                for s in slices:
+                    param.grad[s] = 0
 
 
 class ActivationMasker:
-    """Toggles activation masking on every SafeMoELayer and CausalSelfAttention
-    in the model.
-
-    Flag-based design (MASK-02, Pitfall 4 resolution): enable()/disable() set
-    ``_activation_masking_enabled`` on each SafeMoELayer instance. SafeMoELayer
-    checks this flag in its forward() and skips harmful expert accumulation when
-    True. This avoids the register_forward_hook approach, which cannot
-    un-aggregate already-summed expert outputs.
-
-    Phase 3 extension: also collects CausalSelfAttention instances and
-    monkey-patches ``_activation_masking_enabled`` and ``_harmful_heads`` onto
-    each.  The forward wrapper (``_wrap_attn_forward``) installed here is a
-    pass-through stub; the actual head-output zeroing is added in Plan 03-02.
-
-    Parameters
-    ----------
-    model:
-        The nn.Module (typically a litgpt.GPT) containing SafeMoELayer
-        and CausalSelfAttention instances.
-    registry:
-        Optional HarmfulParamRegistry (not used by enable/disable — retained
-        for API symmetry with GradientMasker).
-    config:
-        Optional SafeMoEConfig.  When provided and ``config.harmful_attn_heads``
-        is non-empty, CausalSelfAttention instances are collected and the
-        per-head activation-masking infrastructure is installed.
-    """
+    """Toggles activation masking on SafeMoELayer and SafeCausalSelfAttention instances."""
 
     def __init__(
         self,
@@ -434,47 +387,28 @@ class ActivationMasker:
     ) -> None:
         self._registry = registry
         from safemoe.model import SafeMoELayer
+        from safemoe.pretrain import SafeCausalSelfAttention
 
         self._layers: list[SafeMoELayer] = [
             m for m in model.modules() if isinstance(m, SafeMoELayer)
         ]
-
-        # Phase 3: collect CausalSelfAttention instances and install flag infrastructure
-        from litgpt.model import CausalSelfAttention
-
-        harmful_heads: list[int] = (
-            list(getattr(config, "harmful_attn_heads", [])) if config else []
-        )
-        self._attn_layers: list[CausalSelfAttention] = []
-        if harmful_heads:
-            for m in model.modules():
-                if isinstance(m, CausalSelfAttention):
-                    m._activation_masking_enabled = False  # type: ignore[attr-defined]
-                    m._harmful_heads = harmful_heads  # type: ignore[attr-defined]
-                    _wrap_attn_forward(m)
-                    self._attn_layers.append(m)
+        harmful_heads: list[int] = list(getattr(config, "harmful_attn_heads", [])) if config else []
+        self._attn_layers: list[SafeCausalSelfAttention] = [
+            m for m in model.modules() if isinstance(m, SafeCausalSelfAttention)
+        ]
+        for layer in self._attn_layers:
+            layer._harmful_heads = harmful_heads
+            layer._activation_masking_enabled = False
 
     def enable(self) -> None:
-        """Enable activation masking on all SafeMoELayer and attn instances.
-
-        Call before the D_std forward pass. Sets
-        ``layer._activation_masking_enabled = True`` on every SafeMoELayer,
-        causing those layers to skip harmful expert contributions in forward().
-        Also sets the flag on every CausalSelfAttention in self._attn_layers.
-        """
+        """Enable activation masking on all tracked layers."""
         for layer in self._layers:
             layer._activation_masking_enabled = True
         for layer in self._attn_layers:
             layer._activation_masking_enabled = True  # type: ignore[attr-defined]
 
     def disable(self) -> None:
-        """Disable activation masking on all SafeMoELayer and attn instances.
-
-        Call after the D_std forward pass. Restores
-        ``layer._activation_masking_enabled = False`` on every SafeMoELayer
-        and every CausalSelfAttention in self._attn_layers so subsequent
-        forward passes use normal dispatch.
-        """
+        """Disable activation masking on all tracked layers."""
         for layer in self._layers:
             layer._activation_masking_enabled = False
         for layer in self._attn_layers:

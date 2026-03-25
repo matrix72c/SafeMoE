@@ -40,7 +40,9 @@ class SafeMoELayer(LLaMAMoE):
         self._harmful_indices: list[int] = list(
             getattr(config, "harmful_expert_indices", [])
         )
+        self._last_indices: torch.Tensor | None = None
         self._last_harmful_routing_mass: torch.Tensor | None = None
+        self._harmful_index_tensor: torch.Tensor | None = None
 
         if init_strategy == "copy":
             # Find the first expert whose index is NOT in the harmful set.
@@ -75,7 +77,10 @@ class SafeMoELayer(LLaMAMoE):
             probs = probs * self.config.routed_scaling_factor
 
         if self._harmful_indices:
-            harmful_indices = torch.tensor(self._harmful_indices, device=indices.device)
+            harmful_indices = self._harmful_index_tensor
+            if harmful_indices is None or harmful_indices.device != indices.device:
+                harmful_indices = torch.tensor(self._harmful_indices, device=indices.device)
+                self._harmful_index_tensor = harmful_indices
             harmful_mask = (indices.unsqueeze(-1) == harmful_indices).any(dim=-1)
             harmful_mass = (probs * harmful_mask.to(dtype=probs.dtype)).sum(dim=1)
             self._last_harmful_routing_mass = harmful_mass.mean()

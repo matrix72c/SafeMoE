@@ -5,15 +5,13 @@ import math
 import pprint
 import random  # SGTM: split sampling via random.choices
 import shlex
-import shutil
 import sys
 import time
-import warnings
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Dict, List, NamedTuple, Optional, Union
 
 import lightning as L
 import torch
@@ -206,6 +204,136 @@ def collect_warmup_routing_mass(model: nn.Module) -> torch.Tensor:
     if not masses:
         return next(model.parameters()).new_zeros(())
     return torch.stack(masses).mean()
+
+
+@dataclass(frozen=True)
+class ValidationRoutingDetails:
+    total_dispatches: int
+    harmful_dispatches: int
+    routing_harmful_frac: float
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    loss: torch.Tensor
+    routing: ValidationRoutingDetails
+
+
+def _unwrap_safemoe_model(model: nn.Module) -> nn.Module:
+    if hasattr(model, "module"):
+        return model.module
+    return model
+
+
+def _resolve_registry_model_view(model: nn.Module) -> nn.Module:
+    raw_model = getattr(model, "_forward_module", model)
+    if hasattr(raw_model, "module") and not isinstance(raw_model, FSDP):
+        return raw_model.module
+    return raw_model
+
+
+def _resolve_module_traversal_view(model: nn.Module) -> nn.Module:
+    return getattr(model, "module", _unwrap_safemoe_model(model))
+
+
+def _replace_attention_modules(model: GPT) -> None:
+    for name, module in list(model.named_modules()):
+        if type(module) is CausalSelfAttention:
+            parent = model.get_submodule(name.rsplit(".", 1)[0]) if "." in name else model
+            attr = name.rsplit(".", 1)[-1]
+            safe_attn = SafeCausalSelfAttention.__new__(SafeCausalSelfAttention)
+            safe_attn.__dict__.update(module.__dict__)
+            setattr(parent, attr, safe_attn)
+
+
+def _setup_model(fabric: L.Fabric, config: SafeMoEConfig, train: TrainArgs) -> GPT:
+    t0 = time.perf_counter()
+    with fabric.init_module(empty_init=True):
+        model = GPT(config)
+
+    initialize_weights(fabric, model, n_layer=config.n_layer, n_embd=config.n_embd)
+
+    if train.tie_embeddings:
+        model.transformer.wte.weight = model.lm_head.weight
+    if train.max_seq_length:
+        model.max_seq_length = train.max_seq_length
+
+    fabric.print(f"Time to instantiate model: {time.perf_counter() - t0:.02f} seconds.")
+    fabric.print(f"Total parameters: {num_parameters(model):,}")
+    _replace_attention_modules(model)
+    return fabric.setup(model)
+
+
+def _build_registry(model: nn.Module, config: SafeMoEConfig) -> HarmfulParamRegistry:
+    return HarmfulParamRegistry(_resolve_registry_model_view(model), config)
+
+
+def _build_optimizer(
+    fabric: L.Fabric,
+    optimizer_config: Union[str, Dict],
+    registry: HarmfulParamRegistry,
+):
+    extra_kwargs = {"fused": fabric.device.type == "cuda"}
+    optimizer = instantiate_torch_optimizer(
+        optimizer_config,
+        registry.parameters_by_type("theta_harmful")
+        + registry.parameters_by_type("theta_std")
+        + registry.parameters_by_type("theta_shared"),
+        **extra_kwargs,
+    )
+    return fabric.setup_optimizers(optimizer)
+
+
+def _build_maskers(
+    model: nn.Module,
+    registry: HarmfulParamRegistry,
+    config: SafeMoEConfig,
+) -> tuple[GradientMasker, ActivationMasker]:
+    module_view = _resolve_module_traversal_view(model)
+    return GradientMasker(registry), ActivationMasker(module_view, registry=registry, config=config)
+
+
+def _iter_safemoe_layers(model: nn.Module):
+    yield from (
+        module
+        for module in _unwrap_safemoe_model(model).modules()
+        if isinstance(module, SafeMoELayer)
+    )
+
+
+def _collect_cached_routing_counts(
+    model: nn.Module,
+    harmful_expert_indices: list[int],
+) -> tuple[int, int]:
+    harmful_index_set = set(harmful_expert_indices)
+    total_dispatches = 0
+    harmful_dispatches = 0
+    for layer in _iter_safemoe_layers(model):
+        indices = layer._last_indices
+        if indices is None:
+            continue
+        flat_indices = indices.detach().reshape(-1)
+        total_dispatches += int(flat_indices.numel())
+        if harmful_index_set:
+            harmful_dispatches += sum(
+                int(expert_idx in harmful_index_set)
+                for expert_idx in flat_indices.tolist()
+            )
+    return total_dispatches, harmful_dispatches
+
+
+def _reduce_routing_counts(
+    fabric: L.Fabric,
+    total_dispatches: int,
+    harmful_dispatches: int,
+) -> tuple[int, int]:
+    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+        return total_dispatches, harmful_dispatches
+    dispatch_tensor = torch.tensor(total_dispatches, device=fabric.device, dtype=torch.long)
+    harmful_tensor = torch.tensor(harmful_dispatches, device=fabric.device, dtype=torch.long)
+    torch.distributed.all_reduce(dispatch_tensor)
+    torch.distributed.all_reduce(harmful_tensor)
+    return int(dispatch_tensor.item()), int(harmful_tensor.item())
 
 
 # ---------------------------------------------------------------------------
@@ -562,67 +690,23 @@ def main(
 
     fabric.seed_everything(seed)  # same seed for every process to init model (FSDP)
 
-    t0 = time.perf_counter()
-    with fabric.init_module(empty_init=True):
-        model = GPT(config)
-
-    initialize_weights(fabric, model, n_layer=config.n_layer, n_embd=config.n_embd)
-
-    if train.tie_embeddings:
-        model.transformer.wte.weight = model.lm_head.weight
-    if train.max_seq_length:
-        model.max_seq_length = train.max_seq_length
-
-    fabric.print(f"Time to instantiate model: {time.perf_counter() - t0:.02f} seconds.")
-    fabric.print(f"Total parameters: {num_parameters(model):,}")
-
-    # SGTM: replace CausalSelfAttention with SafeCausalSelfAttention for head masking support
-    # Must happen BEFORE ActivationMasker construction so model.modules() scan finds the
-    # SafeCausalSelfAttention instances (which inherit from CausalSelfAttention).
-    for name, module in list(model.named_modules()):
-        if type(module) is CausalSelfAttention:
-            parent = model.get_submodule(name.rsplit(".", 1)[0]) if "." in name else model
-            attr = name.rsplit(".", 1)[-1]
-            safe_attn = SafeCausalSelfAttention.__new__(SafeCausalSelfAttention)
-            safe_attn.__dict__.update(module.__dict__)
-            setattr(parent, attr, safe_attn)
+    model = _setup_model(fabric, config, train)
 
     # SGTM: REMOVED torch.compile(model) — incompatible with Python bool flag checks
     # (per RESEARCH.md anti-pattern: torch.compile traces through Python booleans, making
     # dynamic _activation_masking_enabled flag checks ineffective)
-    model = fabric.setup(model)
+    registry = _build_registry(model, config)
+    optimizer = _build_optimizer(fabric, optimizer, registry)
 
-    # SGTM: build registry AFTER fabric.setup() so params are materialized real tensors.
-    # fabric.setup() wraps the model in _FabricModule.  On multi-GPU:
-    #   - DDP: _forward_module is a DistributedDataParallel that adds a "module."
-    #          prefix to all parameter names — unwrap one level to restore them.
-    #   - FSDP: _forward_module is FullyShardedDataParallel.  With use_orig_params=True
-    #           (Lightning default), FSDP already exposes original parameter names, so
-    #           we must NOT unwrap: accessing .module gives the raw GPT whose params
-    #           are on meta device (FSDP moved them into flat shards).
-    _raw = model._forward_module  # _FabricModule -> FSDP/DDP/raw GPT
-    if hasattr(_raw, "module") and not isinstance(_raw, FSDP):
-        _raw = _raw.module        # DDP only — strip the "module." prefix
-    registry = HarmfulParamRegistry(_raw, config)
-
-    # SGTM: single optimizer setup AFTER fabric.setup(model) — params are now materialized.
-    extra_kwargs = {"fused": fabric.device.type == "cuda"}
-    optimizer = instantiate_torch_optimizer(
-        optimizer,
-        registry.parameters_by_type("theta_harmful")
-        + registry.parameters_by_type("theta_std")
-        + registry.parameters_by_type("theta_shared"),
-        **extra_kwargs,
-    )
-    optimizer = fabric.setup_optimizers(optimizer)
-
-    train_dataloader, val_dataloader = get_dataloaders(fabric, data, tokenizer, train, model.max_seq_length)
-    # SGTM: only val_dataloader is fabric-wrapped; split loaders are accessed via data.get_loader()
-    val_dataloader = fabric.setup_dataloaders(val_dataloader)
+    data_loaders = initialize_data_loaders(data, tokenizer, train, model.max_seq_length)
+    val_dataloader = fabric.setup_dataloaders(data_loaders["primary_val_loader"])
 
     # SGTM EVAL-03: extract per-split val loaders for mid-training ablation evaluation
-    # val_dataloaders() returns {"D_std": DataLoader, "D_harmful": DataLoader}
-    val_loaders_for_eval = data.val_dataloaders()
+    # val_loaders contains {"D_std": DataLoader, "D_harmful": DataLoader}
+    val_loaders_for_eval = {
+        split_name: fabric.setup_dataloaders(loader)
+        for split_name, loader in data_loaders["val_loaders"].items()
+    }
 
     if initial_checkpoint_dir:
         fabric.load_raw(initial_checkpoint_dir / "lit_model.pth", model)
@@ -644,12 +728,7 @@ def main(
     # SGTM: Pitfall 3 fix — restore random state for split sampling reproducibility on resume
     random.seed(seed + state["iter_num"])
 
-    # SGTM: instantiate maskers from raw (pre-DDP) model stored in model.module;
-    # modules() scan finds SafeCausalSelfAttention without any DDP name prefix.
-    # model.module unwraps _FabricModule; on multi-GPU DDP the underlying raw GPT
-    # is model._forward_module.module — use the original `raw_model` we kept above.
-    gradient_masker = GradientMasker(registry)
-    activation_masker = ActivationMasker(model.module, registry=registry, config=config)
+    gradient_masker, activation_masker = _build_maskers(model, registry, config)
 
     train_time = time.perf_counter()
 
@@ -750,8 +829,8 @@ def fit(
     optimizer = state["optimizer"]
 
     if eval.initial_validation:
-        val_loss = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
-        val_loss = f"{val_loss:.3f}"
+        val_result = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
+        val_loss = f"{val_result.loss.item():.3f}"
     else:
         fabric.print("Verifying settings ...")
         validate(fabric, model, val_dataloader, max_iters=2, verbose=False)  # sanity check
@@ -774,12 +853,18 @@ def fit(
         measured_flops = 0
         fabric.print("FLOP measurement skipped (meta device does not support MoE ops)")
 
-    max_tokens_per_device = train.max_tokens // fabric.world_size
     tokens_per_iter = train.micro_batch_size * model.max_seq_length
-    max_iters = max_tokens_per_device // tokens_per_iter
     accum_iters = train.gradient_accumulation_iters(devices, num_nodes)
+    if train.max_steps is not None:
+        max_steps = train.max_steps
+        max_iters = max_steps * accum_iters
+    else:
+        max_tokens_per_device = train.max_tokens // fabric.world_size
+        max_iters = max_tokens_per_device // tokens_per_iter
+        max_steps = math.ceil(max_iters / accum_iters)
     log_iter_interval = train.log_interval * accum_iters
     initial_iter = state["iter_num"]
+    initial_step = state["step_count"]
 
     # SGTM: three split iterators replace single CycleIterator (Pattern 1)
     active_labels = [l for l in active_split_labels(stage) if l in data._loaders]
@@ -800,7 +885,7 @@ def fit(
 
     # SGTM: iter_num counts micro-batches; step_count counts optimizer steps
     # The outer while loop drives one OPTIMIZER STEP per iteration (accum_iters micro-batches)
-    while state["iter_num"] < max_iters:
+    while state["step_count"] < max_steps:
         iter_t0 = time.perf_counter()
 
         # SGTM: sample split label once per optimizer step (Pattern 1)
@@ -890,8 +975,8 @@ def fit(
                 "step": state["step_count"],
                 "iter_time": t1 - iter_t0,
                 "remaining_time": (
-                    (t1 - total_t0) / (state["iter_num"] - initial_iter) * (max_iters - state["iter_num"])
-                    if state["iter_num"] > initial_iter else 0
+                    (t1 - total_t0) / (state["step_count"] - initial_step) * (max_steps - state["step_count"])
+                    if state["step_count"] > initial_step else 0
                 ),
                 "tokens": state["iter_num"] * train.micro_batch_size * model.max_seq_length,
                 "total_tokens": (state["iter_num"] * train.micro_batch_size * model.max_seq_length * fabric.world_size),
@@ -929,8 +1014,8 @@ def fit(
 
         if val_dataloader is not None and state["step_count"] % eval.interval == 0:
             t0 = time.perf_counter()
-            val_loss = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
-            val_loss = val_loss.item()
+            val_result = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
+            val_loss = val_result.loss.item()
             td = time.perf_counter() - t0
 
             fabric.print(f"iter {state['iter_num']}: val loss {val_loss:.4f}, val time: {td * 1000:.2f} ms")
@@ -955,7 +1040,6 @@ def fit(
                 emit_routing_observability(
                     fabric=fabric,
                     model=model,
-                    harmful_expert_indices=model.config.harmful_expert_indices,
                     val_loaders=val_loaders,
                     output_dir=checkpoint_dir,
                     run_parity_check=routing_parity_check,
@@ -963,10 +1047,11 @@ def fit(
 
     # Final validation
     if eval.final_validation:
-        val_loss = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
-        metrics = {"val_loss": val_loss, "val_ppl": math.exp(val_loss)}
+        val_result = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
+        val_loss = val_result.loss
+        metrics = {"val_loss": val_loss, "val_ppl": math.exp(val_loss.item())}
         fabric.log_dict(metrics, step=state["iter_num"])
-        fabric.print(f"Final evaluation | val loss: {val_loss.item():.3f} | val ppl: {math.exp(val_loss):.3f}")
+        fabric.print(f"Final evaluation | val loss: {val_loss.item():.3f} | val ppl: {math.exp(val_loss.item()):.3f}")
 
 
 # ---------------------------------------------------------------------------
@@ -1000,9 +1085,8 @@ def evaluate_with_ablation(
         metrics: dict = {}
         for split_name, loader in val_loaders.items():
             # val_loaders has D_std and D_harmful only — no D_unlabeled (user decision)
-            val_loss = validate(fabric, model, loader, max_iters=max_iters, verbose=False)
-            ppl = math.exp(val_loss.item())
-            metrics[f"ablated_val_ppl_{split_name}"] = ppl
+            val_result = validate(fabric, model, loader, max_iters=max_iters, verbose=False)
+            metrics[f"ablated_val_ppl_{split_name}"] = math.exp(val_result.loss.item())
     finally:
         for p, saved_data in zip(harmful_params, saved):
             p.data.copy_(saved_data)
@@ -1017,31 +1101,41 @@ def evaluate_with_ablation(
 def emit_routing_observability(
     fabric: L.Fabric,
     model: nn.Module,
-    harmful_expert_indices: list[int],
     val_loaders: dict,
     output_dir: Path,
     logged_metrics: Optional[dict] = None,
     run_parity_check: bool = False,
 ) -> dict:
-    collector = RoutingObservabilityCollector(model, harmful_expert_indices)
-    split_runners = {
-        split_name: (
-            lambda loader=loader: validate(
-                fabric,
-                model,
-                fabric.setup_dataloaders(loader),
-                max_iters=sys.maxsize,
-                verbose=False,
-            )
+    observed_metrics: dict[str, float] = {}
+    for split_name, loader in val_loaders.items():
+        result = validate(
+            fabric,
+            model,
+            loader,
+            max_iters=1,
+            verbose=False,
         )
-        for split_name, loader in val_loaders.items()
-    }
-    observed_metrics = collector.collect_splits(split_runners)
+        observed_metrics[f"dispatch_count_{split_name}"] = result.routing.total_dispatches
+        observed_metrics[f"routing_harmful_frac_{split_name}"] = result.routing.routing_harmful_frac
     write_routing_artifacts(output_dir, observed_metrics, markdown_title="Routing Observability")
     if run_parity_check:
+        collector = RoutingObservabilityCollector(model, model.config.harmful_expert_indices)
+        split_runners = {
+            split_name: (
+                lambda loader=loader: validate(
+                    fabric,
+                    model,
+                    loader,
+                    max_iters=sys.maxsize,
+                    verbose=False,
+                ).loss
+            )
+            for split_name, loader in val_loaders.items()
+        }
+        parity_metrics = collector.collect_splits(split_runners)
         assert_routing_parity(
             logged_metrics=logged_metrics or observed_metrics,
-            observed_metrics=observed_metrics,
+            observed_metrics=parity_metrics,
             output_dir=output_dir,
         )
     return observed_metrics
@@ -1053,11 +1147,16 @@ def emit_routing_observability(
 
 @torch.no_grad()
 def validate(
-    fabric: L.Fabric, model: nn.Module, val_dataloader: DataLoader, max_iters: int, verbose: bool = True
-) -> torch.Tensor:
+    fabric: L.Fabric,
+    model: nn.Module,
+    val_dataloader: DataLoader,
+    max_iters: int,
+    verbose: bool = True,
+) -> ValidationResult:
     fabric.barrier()
     if verbose:
         fabric.print("Validating ...")
+    was_training = model.training
     model.eval()
 
     # Override default dtype so the Fabric HalfPrecision plugin's convert_output
@@ -1067,6 +1166,10 @@ def validate(
     torch.set_default_dtype(torch.bfloat16)
     total_loss = 0.0
     count = 0
+    total_dispatches = 0
+    harmful_dispatches = 0
+    unwrapped_model = _unwrap_safemoe_model(model)
+    harmful_expert_indices = list(getattr(unwrapped_model.config, "harmful_expert_indices", []))
     try:
         for k, batch in enumerate(val_dataloader):
             if k >= max_iters:
@@ -1074,42 +1177,50 @@ def validate(
             input_ids = batch[:, 0 : model.max_seq_length].contiguous().long().to(fabric.device)
             targets = batch[:, 1 : (model.max_seq_length + 1)].contiguous().long().to(fabric.device)
             logits = model(input_ids)
+            batch_total_dispatches, batch_harmful_dispatches = _collect_cached_routing_counts(
+                model,
+                harmful_expert_indices,
+            )
+            total_dispatches += batch_total_dispatches
+            harmful_dispatches += batch_harmful_dispatches
             loss = chunked_cross_entropy(logits, targets)
             total_loss += loss.item()
             count += 1
     finally:
         torch.set_default_dtype(prev_dtype)
+        model.train(was_training)
+        fabric.barrier()
 
     val_loss = torch.tensor(total_loss / max(count, 1), device=fabric.device)
-    model.train()
-    fabric.barrier()
-    return val_loss
+    total_dispatches, harmful_dispatches = _reduce_routing_counts(
+        fabric,
+        total_dispatches=total_dispatches,
+        harmful_dispatches=harmful_dispatches,
+    )
+    routing_harmful_frac = harmful_dispatches / max(total_dispatches, 1)
+    return ValidationResult(
+        loss=val_loss,
+        routing=ValidationRoutingDetails(
+            total_dispatches=total_dispatches,
+            harmful_dispatches=harmful_dispatches,
+            routing_harmful_frac=routing_harmful_frac,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
-# get_dataloaders() — SGTM: only sets up data module, returns val DataLoader
+# initialize_data_loaders() — SGTM: set up data module and return structured loaders
 # ---------------------------------------------------------------------------
 
-def get_dataloaders(
-    fabric: L.Fabric,
+def initialize_data_loaders(
     data: SafeDataModule,
     tokenizer: Optional[Tokenizer],
     train: TrainArgs,
     block_size: int,
-) -> Tuple[None, DataLoader]:
-    """Set up data module and return (None, val_dataloader).
-
-    The training split loaders are accessed via ``data.get_loader(split_label)``
-    directly in fit() — not returned here.  Returns None for the train slot to
-    signal that the caller should use ``data.get_loader()``.
-    """
+) -> dict[str, object]:
+    """Set up the data module and return structured train/val loader handles."""
     data.connect(tokenizer=tokenizer, batch_size=train.micro_batch_size, max_seq_length=block_size)
-    data.setup()
-    val_dataloader = data.val_dataloader()
-    # val_dataloader() returns a list; use first entry (D_std val) for scalar val_loss
-    if isinstance(val_dataloader, list):
-        val_dataloader = val_dataloader[0]
-    return None, val_dataloader
+    return data.initialize_loaders()
 
 
 # ---------------------------------------------------------------------------
@@ -1217,12 +1328,6 @@ def validate_args(train: TrainArgs, eval: EvalArgs, initial_checkpoint_dir, resu
         for name in names:
             if getattr(args, name) is not None:
                 issues.append(f"{__file__} doesn't support the {name!r} argument. This is set in {args}")
-    if train.max_steps is not None:
-        warnings.warn(
-            "`train.max_steps` is intended for profiling or debug runs only. "
-            "For full pretraining runs, prefer `train.max_tokens` or `train.max_time`.",
-            UserWarning,
-        )
     required = [(train, ["max_tokens", "max_norm"])]
     for args, names in required:
         for name in names:

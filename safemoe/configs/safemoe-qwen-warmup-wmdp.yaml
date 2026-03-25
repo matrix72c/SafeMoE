@@ -4,7 +4,7 @@ devices: 4
 num_nodes: 1
 seed: 42
 logger_name: wandb
-run_name: safemoe-qwen-warmup
+run_name: safemoe-qwen-warmup-wmdp
 log:
   project: safemoe
 
@@ -40,15 +40,30 @@ data:
   init_args:
     cache_dir: data/.cache
     seed: 42
-    num_workers: 4
+    num_workers: 128
     datasets:
-      tinystories_en:
-        path: data/multilingual-tinystories/en
+      # finewebedu:
+      #   path: data/fineweb-edu-100b-shuffle
+      #   text_column: text
+      #   role: std
+      #   label_ratio: 0.05
+      wmdp_bio_retain:
+        path: data/wmdp/bio-retain-corpus
         text_column: text
         role: std
-        label_ratio: 0.25
-      tinystories_es:
-        path: data/multilingual-tinystories/es
+        label_ratio: 1.0
+      wmdp_cyber_retain:
+        path: data/wmdp/cyber-retain-corpus
+        text_column: text
+        role: std
+        label_ratio: 1.0
+      wmdp_bio_forget:
+        path: data/wmdp/bio-forget-corpus
+        text_column: text
+        role: harmful
+        label_ratio: 1.0
+      wmdp_cyber_forget:
+        path: data/wmdp/cyber-forget-corpus
         text_column: text
         role: harmful
         label_ratio: 1.0

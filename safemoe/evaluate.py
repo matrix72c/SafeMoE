@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import lightning as L
 import torch
+import warnings
 import yaml
 from lightning.fabric.plugins.precision.fsdp import FSDPPrecision
 from lightning.fabric.strategies import FSDPStrategy
@@ -19,7 +20,6 @@ from torch.utils.data import DataLoader
 from litgpt.model import GPT, Block
 from litgpt.utils import check_valid_checkpoint_dir, parse_devices
 from safemoe.config import SafeMoEConfig
-from safemoe.observability import RoutingObservabilityCollector
 from safemoe.pretrain import validate
 
 
@@ -187,6 +187,24 @@ def _make_eval_fabric(
     return fabric
 
 
+def _load_checkpoint_config(ckpt_dir: Path) -> SafeMoEConfig:
+    ckpt_dir = _ensure_checkpoint_dir(ckpt_dir)
+    raw = yaml.safe_load((ckpt_dir / "model_config.yaml").read_text())
+    if not isinstance(raw, dict):
+        raise TypeError(f"Expected mapping in {ckpt_dir / 'model_config.yaml'}")
+    return SafeMoEConfig(**{k: v for k, v in raw.items() if not isinstance(v, dict)})
+
+
+def _load_checkpoint_hyperparameters(ckpt_dir: Path) -> dict[str, Any]:
+    hp_path = ckpt_dir / "hyperparameters.yaml"
+    if not hp_path.exists():
+        return {}
+    hp = yaml.safe_load(hp_path.read_text())
+    if not isinstance(hp, dict):
+        raise TypeError(f"Expected mapping in {hp_path}, got {type(hp).__name__}")
+    return hp
+
+
 def _load_model(ckpt_dir: Path, fabric: Optional[L.Fabric] = None) -> tuple:
     """Load a SafeMoE model from a checkpoint directory.
 
@@ -195,8 +213,7 @@ def _load_model(ckpt_dir: Path, fabric: Optional[L.Fabric] = None) -> tuple:
     multi-GPU evaluation can use sharded model setup.
     """
     ckpt_dir = _ensure_checkpoint_dir(ckpt_dir)
-    raw = yaml.safe_load((ckpt_dir / "model_config.yaml").read_text())
-    config = SafeMoEConfig(**{k: v for k, v in raw.items() if not isinstance(v, dict)})
+    config = _load_checkpoint_config(ckpt_dir)
 
     if fabric is None:
         model = GPT(config)
@@ -242,33 +259,6 @@ class _TokenizerModelNameAlias:
         return getattr(self._tokenizer, name)
 
 
-class _DatasetBatchIterable:
-    """Sequentially batch indexable datasets without going through DataLoader internals."""
-
-    def __init__(self, dataset: object, batch_size: int, drop_last: bool = False) -> None:
-        self.dataset = dataset
-        self.batch_size = batch_size
-        self.drop_last = drop_last
-
-    def __iter__(self):
-        dataset_length = len(self.dataset)
-        step = self.batch_size
-        limit = dataset_length if not self.drop_last else dataset_length - (dataset_length % step)
-        for start in range(0, limit, step):
-            stop = min(start + step, dataset_length)
-            if self.drop_last and stop - start < step:
-                break
-            # litdata StreamingDataset returns tensors backed by storage that can
-            # segfault under downstream tensor ops unless copied into ordinary tensors.
-            yield torch.stack([self.dataset[index].clone() for index in range(start, stop)])
-
-    def __len__(self) -> int:
-        dataset_length = len(self.dataset)
-        if self.drop_last:
-            return dataset_length // self.batch_size
-        return (dataset_length + self.batch_size - 1) // self.batch_size
-
-
 def _resolve_manifest_checkpoint_dir(ckpt_dir: Path, raw_path: str) -> Path:
     candidate = Path(raw_path)
     if candidate.is_absolute() or candidate.exists():
@@ -284,15 +274,11 @@ def _resolve_manifest_checkpoint_dir(ckpt_dir: Path, raw_path: str) -> Path:
 def _load_eval_tokenizer(ckpt_dir: Path) -> tuple[object | None, str | None]:
     from litgpt.tokenizer import Tokenizer
 
-    hp_path = ckpt_dir / "hyperparameters.yaml"
-    if hp_path.exists():
-        hp = yaml.safe_load(hp_path.read_text())
-        if not isinstance(hp, dict):
-            raise TypeError(f"Expected mapping in {hp_path}, got {type(hp).__name__}")
-        tokenizer_dir = hp.get("tokenizer_dir")
-        if tokenizer_dir:
-            tokenizer = Tokenizer(Path(tokenizer_dir))
-            return tokenizer, tokenizer.model_name
+    hp = _load_checkpoint_hyperparameters(ckpt_dir)
+    tokenizer_dir = hp.get("tokenizer_dir")
+    if tokenizer_dir:
+        tokenizer = Tokenizer(Path(tokenizer_dir))
+        return tokenizer, tokenizer.model_name
 
     manifest_path = ckpt_dir / "intervention_manifest.json"
     if manifest_path.exists():
@@ -333,38 +319,8 @@ def _load_eval_tokenizer(ckpt_dir: Path) -> tuple[object | None, str | None]:
     return None, None
 
 
-def _get_eval_streaming_num_workers() -> int:
-    """Return the worker count for standalone evaluation data loaders.
-
-    Default to 0 to avoid litdata multiprocessing worker crashes on networked
-    storage during standalone evaluation runs. Allow explicit override for
-    users who want to trade safety for throughput.
-    """
-    raw_value = os.environ.get("SAFEMOE_EVAL_NUM_WORKERS")
-    if raw_value is None:
-        return 0
-
-    try:
-        value = int(raw_value)
-    except ValueError as exc:
-        raise ValueError(
-            "SAFEMOE_EVAL_NUM_WORKERS must be an integer >= 0, "
-            f"got {raw_value!r}"
-        ) from exc
-    if value < 0:
-        raise ValueError(
-            "SAFEMOE_EVAL_NUM_WORKERS must be an integer >= 0, "
-            f"got {raw_value!r}"
-        )
-    return value
-
-
 def _get_val_loaders(ckpt_dir: Path, config: SafeMoEConfig, data_mock=None) -> dict:
-    """Return {"D_std": DataLoader, "D_harmful": DataLoader}.
-
-    If data_mock is provided, delegate to data_mock.val_dataloaders().
-    Otherwise construct a SafeDataModule from checkpoint hyperparameters.
-    """
+    """Return {"D_std": loader, "D_harmful": loader}."""
     if data_mock is not None:
         return data_mock.val_dataloaders()
 
@@ -373,23 +329,19 @@ def _get_val_loaders(ckpt_dir: Path, config: SafeMoEConfig, data_mock=None) -> d
     cache_dir = Path("data/.cache")
     datasets_cfg = {}
 
-    hp_path = ckpt_dir / "hyperparameters.yaml"
-    if hp_path.exists():
-        hp = yaml.safe_load(hp_path.read_text())
-        if not isinstance(hp, dict):
-            raise TypeError(f"Expected mapping in {hp_path}, got {type(hp).__name__}")
-        data_cfg = hp.get("data")
-        if isinstance(data_cfg, dict):
-            init_args = data_cfg.get("init_args")
-            if isinstance(init_args, dict):
-                if "cache_dir" in init_args:
-                    cache_dir = Path(init_args["cache_dir"])
-                datasets_cfg = init_args.get("datasets", datasets_cfg)
+    hp = _load_checkpoint_hyperparameters(ckpt_dir)
+    data_cfg = hp.get("data")
+    if isinstance(data_cfg, dict):
+        init_args = data_cfg.get("init_args")
+        if isinstance(init_args, dict):
+            if "cache_dir" in init_args:
+                cache_dir = Path(init_args["cache_dir"])
+            datasets_cfg = init_args.get("datasets", datasets_cfg)
 
     if not datasets_cfg:
         raise ValueError(
             f"Cannot construct SafeDataModule for evaluation: "
-            f"no datasets found in {hp_path}. "
+            f"no datasets found in {ckpt_dir / 'hyperparameters.yaml'}. "
             "Pass a data_mock or ensure hyperparameters.yaml has data.init_args.datasets."
         )
 
@@ -397,15 +349,33 @@ def _get_val_loaders(ckpt_dir: Path, config: SafeMoEConfig, data_mock=None) -> d
     if tokenizer_name is not None:
         tokenizer = _TokenizerModelNameAlias(tokenizer, tokenizer_name)
 
-    loader = SafeDataModule(cache_dir=cache_dir, datasets=datasets_cfg)
-    loader.num_workers = _get_eval_streaming_num_workers()
-    loader.connect(tokenizer=tokenizer, batch_size=1, max_seq_length=config.block_size)
-    if hasattr(loader, "val_datasets"):
-        return {
-            split_name: _DatasetBatchIterable(dataset, batch_size=loader.batch_size, drop_last=False)
-            for split_name, dataset in loader.val_datasets().items()
-        }
-    return loader.val_dataloaders()
+    data = SafeDataModule(cache_dir=cache_dir, datasets=datasets_cfg)
+    raw_value = os.environ.get("SAFEMOE_EVAL_NUM_WORKERS")
+    if raw_value is None:
+        data.num_workers = 0
+    else:
+        try:
+            value = int(raw_value)
+        except ValueError as exc:
+            raise ValueError(
+                "SAFEMOE_EVAL_NUM_WORKERS must be an integer >= 0, "
+                f"got {raw_value!r}"
+            ) from exc
+        if value < 0:
+            raise ValueError(
+                "SAFEMOE_EVAL_NUM_WORKERS must be an integer >= 0, "
+                f"got {raw_value!r}"
+            )
+        data.num_workers = value
+        if value != 0:
+            warnings.warn(
+                "SAFEMOE_EVAL_NUM_WORKERS overrides the default eval worker count; "
+                "standalone evaluation may be less stable on networked storage.",
+                stacklevel=2,
+            )
+
+    data.connect(tokenizer=tokenizer, batch_size=1, max_seq_length=config.block_size)
+    return data._build_val_loader_iterables(batch_size=1, drop_last=False)
 
 
 def _prepare_eval_loader(fabric: L.Fabric, loader: object) -> object:
@@ -444,8 +414,7 @@ def _ensure_surgery_checkpoint(ckpt_dir: Path) -> Path:
     *ckpt_dir* unchanged.  Surgery is idempotent: re-running it reuses the
     existing output when the parameters match.
     """
-    raw = yaml.safe_load((ckpt_dir / "model_config.yaml").read_text())
-    config = SafeMoEConfig(**{k: v for k, v in raw.items() if not isinstance(v, dict)})
+    config = _load_checkpoint_config(ckpt_dir)
     if config.harmful_expert_indices:
         return ckpt_dir
 
@@ -456,9 +425,7 @@ def _ensure_surgery_checkpoint(ckpt_dir: Path) -> Path:
             "hyperparameters.yaml to derive surgery parameters from. "
             "Run surgery manually first."
         )
-    hp = yaml.safe_load(hp_path.read_text())
-    if not isinstance(hp, dict):
-        raise TypeError(f"Expected mapping in {hp_path}")
+    hp = _load_checkpoint_hyperparameters(ckpt_dir)
     num_harmful_experts = hp.get("num_harmful_experts") or 0
     num_harmful_attn_heads = hp.get("num_harmful_attn_heads") or 0
     epsilon = hp.get("epsilon")
@@ -514,56 +481,22 @@ def _create_eval_session(
     return _EvalSession(fabric=fabric, model=model, config=config, val_loaders=val_loaders)
 
 
-def _compute_perplexity_metrics(session: _EvalSession) -> dict[str, float]:
-    metrics: dict[str, float] = {}
-    for split in ["D_std", "D_harmful"]:
-        loader = _prepare_eval_loader(session.fabric, session.val_loaders[split])
-        loss = validate(session.fabric, session.model, loader, max_iters=sys.maxsize, verbose=False)
-        metrics[f"val_ppl_{split}"] = math.exp(loss.item())
-    return metrics
-
-
-def _aggregate_routing_results(fabric: L.Fabric, routing_results: dict[str, float]) -> dict[str, float]:
-    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
-        return routing_results
-
-    aggregated: dict[str, float] = {}
-    split_names = {
-        key.removeprefix("dispatch_count_")
-        for key in routing_results
-        if key.startswith("dispatch_count_")
-    }
-    for split_name in split_names:
-        dispatch_count = int(routing_results[f"dispatch_count_{split_name}"])
-        harmful_dispatches = int(round(routing_results[f"routing_harmful_frac_{split_name}"] * dispatch_count))
-        dispatch_tensor = torch.tensor(dispatch_count, device=fabric.device, dtype=torch.long)
-        harmful_tensor = torch.tensor(harmful_dispatches, device=fabric.device, dtype=torch.long)
-        torch.distributed.all_reduce(dispatch_tensor)
-        torch.distributed.all_reduce(harmful_tensor)
-        total_dispatches = int(dispatch_tensor.item())
-        aggregated[f"dispatch_count_{split_name}"] = total_dispatches
-        aggregated[f"routing_harmful_frac_{split_name}"] = harmful_tensor.item() / max(total_dispatches, 1)
-    return aggregated
-
-
-def _compute_routing_metrics(session: _EvalSession) -> dict[str, float]:
-    collector = RoutingObservabilityCollector(session.model, session.config.harmful_expert_indices)
-    split_runners = {
-        split_name: (
-            lambda loader=loader: validate(
-                session.fabric,
-                session.model,
-                _prepare_eval_loader(session.fabric, loader),
-                max_iters=sys.maxsize,
-                verbose=False,
-            )
+def _compute_split_metrics(session: _EvalSession) -> tuple[dict[str, float], dict[str, float]]:
+    perplexity_metrics: dict[str, float] = {}
+    routing_metrics: dict[str, float] = {}
+    for split_name in ["D_std", "D_harmful"]:
+        loader = _prepare_eval_loader(session.fabric, session.val_loaders[split_name])
+        result = validate(
+            session.fabric,
+            session.model,
+            loader,
+            max_iters=sys.maxsize,
+            verbose=False,
         )
-        for split_name, loader in session.val_loaders.items()
-    }
-    routing_results = collector.collect_splits(split_runners)
-    routing_results = _aggregate_routing_results(session.fabric, routing_results)
+        perplexity_metrics[f"val_ppl_{split_name}"] = math.exp(result.loss.item())
+        routing_metrics[f"dispatch_count_{split_name}"] = result.routing.total_dispatches
+        routing_metrics[f"routing_harmful_frac_{split_name}"] = result.routing.routing_harmful_frac
 
-    routing_metrics = dict(routing_results)
     if {
         "routing_harmful_frac_D_std",
         "routing_harmful_frac_D_harmful",
@@ -572,7 +505,7 @@ def _compute_routing_metrics(session: _EvalSession) -> dict[str, float]:
             routing_metrics["routing_harmful_frac_D_harmful"]
             - routing_metrics["routing_harmful_frac_D_std"]
         )
-    return routing_metrics
+    return perplexity_metrics, routing_metrics
 
 
 def _evaluate_checkpoint(
@@ -591,9 +524,10 @@ def _evaluate_checkpoint(
         num_nodes=num_nodes,
         precision=precision,
     )
+    perplexity_metrics, routing_metrics = _compute_split_metrics(session)
     checkpoint_metrics: dict[str, dict[str, float]] = {
-        "perplexity": _compute_perplexity_metrics(session),
-        "routing": _compute_routing_metrics(session),
+        "perplexity": perplexity_metrics,
+        "routing": routing_metrics,
     }
     return session, checkpoint_metrics
 
@@ -679,7 +613,7 @@ def _print_summary_table(
             print(f"{label:<16} {split:<14} {original_value:>12.{digits}f}")
 
 
-def evaluate_checkpoint(
+def _run_evaluation(
     original_ckpt_dir: Path,
     ablated_ckpt_dir: Optional[Path] = None,
     data_mock=None,
@@ -687,8 +621,7 @@ def evaluate_checkpoint(
     devices: int | str = 1,
     num_nodes: int = 1,
     precision: Optional[str] = None,
-) -> dict:
-    """Evaluate all checkpoint metrics and persist them to checkpoints/results.json."""
+) -> tuple[dict[str, Any], Optional[Path]]:
     original_ckpt_dir = Path(original_ckpt_dir)
     ablated_ckpt_dir = Path(ablated_ckpt_dir) if ablated_ckpt_dir is not None else None
 
@@ -704,7 +637,6 @@ def evaluate_checkpoint(
             precision=precision,
         )
         ablated_metrics: Optional[dict[str, dict[str, float]]] = None
-        results_path: Optional[Path] = None
 
         if ablated_ckpt_dir is not None:
             ablated_session, ablated_metrics = _evaluate_checkpoint(
@@ -725,18 +657,53 @@ def evaluate_checkpoint(
         else:
             results_path = _persist_checkpoint_metrics(original_session, original_ckpt_dir, original_metrics)
 
-        _print_summary_table(original_metrics, ablated_metrics)
-        if results_path is not None:
-            print(f"\nResults written to {results_path}")
-        return _build_combined_metrics_record(
+        combined_metrics = _build_combined_metrics_record(
             original_ckpt_dir,
             original_metrics,
             ablated_ckpt_dir=ablated_ckpt_dir,
             ablated_metrics=ablated_metrics,
         )
+        return combined_metrics, results_path
     finally:
         _teardown_eval_session(ablated_session)
         _teardown_eval_session(original_session)
+
+
+def _resolve_cli_ablated_checkpoint(original: Path, ablated: Optional[Path]) -> Optional[Path]:
+    if ablated is not None:
+        return Path(ablated)
+
+    candidate = original / "ablated"
+    if not (candidate / "lit_model.pth").exists():
+        print(f"No ablated checkpoint at {candidate} — running ablation first …")
+        from safemoe.ablate import ablate
+        ablate(original)
+    return candidate
+
+
+def evaluate_checkpoint(
+    original_ckpt_dir: Path,
+    ablated_ckpt_dir: Optional[Path] = None,
+    data_mock=None,
+    accelerator: str = "auto",
+    devices: int | str = 1,
+    num_nodes: int = 1,
+    precision: Optional[str] = None,
+) -> dict:
+    """Evaluate all checkpoint metrics and persist them to checkpoints/results.json."""
+    combined_metrics, results_path = _run_evaluation(
+        original_ckpt_dir,
+        ablated_ckpt_dir=ablated_ckpt_dir,
+        data_mock=data_mock,
+        accelerator=accelerator,
+        devices=devices,
+        num_nodes=num_nodes,
+        precision=precision,
+    )
+    _print_summary_table(combined_metrics["original"], combined_metrics.get("ablated", {}).get("metrics"))
+    if results_path is not None:
+        print(f"\nResults written to {results_path}")
+    return combined_metrics
 
 
 def evaluate_routing(
@@ -748,25 +715,18 @@ def evaluate_routing(
     precision: Optional[str] = None,
 ) -> dict:
     """Evaluate routing metrics and persist the full checkpoint results."""
-    ckpt_dir = Path(ckpt_dir)
-    session: Optional[_EvalSession] = None
-    try:
-        session, checkpoint_metrics = _evaluate_checkpoint(
-            ckpt_dir,
-            data_mock=data_mock,
-            accelerator=accelerator,
-            devices=devices,
-            num_nodes=num_nodes,
-            precision=precision,
-        )
-        routing_metrics = checkpoint_metrics["routing"]
-        results_path = _persist_checkpoint_metrics(session, ckpt_dir, checkpoint_metrics)
-        _print_summary_table(checkpoint_metrics)
-        if results_path is not None:
-            print(f"\nResults written to {results_path}")
-        return routing_metrics
-    finally:
-        _teardown_eval_session(session)
+    combined_metrics, results_path = _run_evaluation(
+        ckpt_dir,
+        data_mock=data_mock,
+        accelerator=accelerator,
+        devices=devices,
+        num_nodes=num_nodes,
+        precision=precision,
+    )
+    _print_summary_table(combined_metrics["original"])
+    if results_path is not None:
+        print(f"\nResults written to {results_path}")
+    return combined_metrics["original"]["routing"]
 
 
 def evaluate_cli(
@@ -784,55 +744,17 @@ def evaluate_cli(
     ``<ckpt_dir>/ablated/``.  If that directory has no ``lit_model.pth`` the
     ablation is run automatically before evaluation begins.
     """
-    original = Path(original)
-    original = _ensure_surgery_checkpoint(original)
-    devices = parse_devices(devices)
-
-    if ablated is not None:
-        ablated = Path(ablated)
-    else:
-        candidate = original / "ablated"
-        if not (candidate / "lit_model.pth").exists():
-            print(f"No ablated checkpoint at {candidate} — running ablation first …")
-            from safemoe.ablate import ablate
-            ablate(original)
-        ablated = candidate
-
-    original_session: Optional[_EvalSession] = None
-    ablated_session: Optional[_EvalSession] = None
-    try:
-        original_session, original_metrics = _evaluate_checkpoint(
-            original,
-            accelerator=accelerator,
-            devices=devices,
-            num_nodes=num_nodes,
-            precision=precision,
-        )
-        ablated_metrics: Optional[dict[str, dict[str, float]]] = None
-        results_path: Optional[Path] = None
-
-        if ablated is not None:
-            ablated_session, ablated_metrics = _evaluate_checkpoint(
-                ablated,
-                accelerator=accelerator,
-                devices=devices,
-                num_nodes=num_nodes,
-                precision=precision,
-            )
-            results_path = _persist_combined_metrics(
-                original_session,
-                original,
-                original_metrics,
-                ablated_ckpt_dir=ablated,
-                ablated_metrics=ablated_metrics,
-            )
-        else:
-            results_path = _persist_checkpoint_metrics(original_session, original, original_metrics)
-
-        _print_summary_table(original_metrics, ablated_metrics)
-        if results_path is not None:
-            print(f"\nResults written to {results_path}")
-    finally:
-        _teardown_eval_session(ablated_session)
-        _teardown_eval_session(original_session)
+    original = _ensure_surgery_checkpoint(Path(original))
+    resolved_ablated = _resolve_cli_ablated_checkpoint(original, ablated)
+    combined_metrics, results_path = _run_evaluation(
+        original,
+        ablated_ckpt_dir=resolved_ablated,
+        accelerator=accelerator,
+        devices=parse_devices(devices),
+        num_nodes=num_nodes,
+        precision=precision,
+    )
+    _print_summary_table(combined_metrics["original"], combined_metrics.get("ablated", {}).get("metrics"))
+    if results_path is not None:
+        print(f"\nResults written to {results_path}")
 

@@ -1,0 +1,55 @@
+model_name: Qwen3-30B-A3B-Base
+tokenizer_dir: checkpoints/Qwen3-30B-A3B-Base
+devices: 4
+num_nodes: 1
+seed: 42
+logger_name: csv
+run_name: safemoe-qwen-warmup-tinystories-mock
+
+stage: warmup
+base_checkpoint: checkpoints/Qwen3-30B-A3B-Base
+num_harmful_experts: 8
+num_harmful_attn_heads: 4
+epsilon: 1.0e-5
+warmup_routing_loss_weight: 0.1
+warmup_harmful_mass_floor: 0.7
+warmup_std_mass_ceiling: 0.1
+train:
+  micro_batch_size: 1
+  global_batch_size: 4
+  save_interval: 1
+  log_interval: 1
+  max_tokens: 4096
+  max_steps: 1
+  max_seq_length: 256
+  max_norm: 1.0
+  min_lr: 4.0e-05
+  lr_warmup_steps: 1
+
+eval:
+  interval: 1
+  max_iters: 1
+  initial_validation: true
+  final_validation: true
+
+data:
+  class_path: safemoe.data.datamodule.SafeDataModule
+  init_args:
+    cache_dir: data/.cache
+    seed: 42
+    num_workers: 128
+    datasets:
+      tinystories_en:
+        path: data/multilingual-tinystories/en
+        text_column: text
+        role: std
+        label_ratio: 0.25
+      tinystories_es:
+        path: data/multilingual-tinystories/es
+        text_column: text
+        role: harmful
+        label_ratio: 1.0
+
+upsample_std: 1.0
+upsample_harmful: 1.0
+upsample_unlabeled: 1.0
