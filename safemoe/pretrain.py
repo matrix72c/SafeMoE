@@ -196,13 +196,6 @@ def warmup_routing_loss(
     return harmful_mass.new_zeros(())
 
 
-def validate_stage_upsampling(
-    stage: Literal["transfer", "warmup"],
-    upsample_unlabeled: float,
-) -> None:
-    if stage == "warmup" and upsample_unlabeled != 0.0:
-        raise ValueError("upsample_unlabeled must be 0.0 for warmup")
-
 
 def collect_warmup_routing_mass(model: nn.Module) -> torch.Tensor:
     masses = [
@@ -432,7 +425,6 @@ def setup(
         raise ValueError(
             "upsample_std/harmful/unlabeled are required fields — no defaults"
         )
-    validate_stage_upsampling(stage, float(upsample_unlabeled))
 
     if model_name == "list":
         available_models = "\n".join(sorted(name_to_config))
@@ -560,7 +552,6 @@ def main(
     warmup_std_mass_ceiling: float = 0.4,
 ) -> None:
     validate_args(train, eval, initial_checkpoint_dir, resume)
-    validate_stage_upsampling(stage, upsample_unlabeled)
 
     if fabric.global_rank == 0:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -753,7 +744,6 @@ def fit(
 ) -> None:
     model = state["model"]
     optimizer = state["optimizer"]
-    validate_stage_upsampling(stage, upsample_unlabeled)
 
     if eval.initial_validation:
         val_loss = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
