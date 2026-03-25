@@ -483,6 +483,10 @@ def setup(
         log_args=log_args,
     )
 
+    data_max_seq_length = train.max_seq_length or config.block_size
+    data.connect(tokenizer=tokenizer, batch_size=train.micro_batch_size, max_seq_length=data_max_seq_length)
+    data.prepare_data()
+
     if devices * num_nodes > 1:
         strategy = FSDPStrategy(auto_wrap_policy={Block}, state_dict_type="full", sharding_strategy="HYBRID_SHARD")
     else:
@@ -1100,8 +1104,6 @@ def get_dataloaders(
     signal that the caller should use ``data.get_loader()``.
     """
     data.connect(tokenizer=tokenizer, batch_size=train.micro_batch_size, max_seq_length=block_size)
-    with fabric.rank_zero_first():
-        data.prepare_data()
     data.setup()
     val_dataloader = data.val_dataloader()
     # val_dataloader() returns a list; use first entry (D_std val) for scalar val_loss
