@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 import os
-import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import torch
 
@@ -15,13 +13,16 @@ from litgpt.tokenizer import Tokenizer
 
 @dataclass
 class SafeDataModule(DataModule):
-    """Multi-dataset DataModule with per-dataset role and label_ratio configuration.
+    """Multi-dataset DataModule with per-dataset role, split ratios, and split-local weights.
 
     Each dataset is configured with:
       - path: directory containing train/val parquet or jsonl files
       - text_column: column name for text data
       - role: "std" or "harmful" — determines which training split the labeled portion joins
-      - label_ratio: fraction of training data used as labeled (rest goes to D_unlabeled)
+      - label_ratio: fraction of training data used as labeled
+      - unlabel_ratio: fraction of training data used as unlabeled
+      - label_weight: mixing weight inside the labeled destination split
+      - unlabel_weight: mixing weight inside D_unlabeled
 
     Access pattern:
         loader = data.get_loader('D_std')
@@ -35,7 +36,7 @@ class SafeDataModule(DataModule):
     datasets: dict = field(default_factory=dict)
 
     # Set by connect()
-    tokenizer: Optional[Tokenizer] = field(default=None, init=False, repr=False)
+    tokenizer: Tokenizer | None = field(default=None, init=False, repr=False)
     batch_size: int = field(default=1, init=False, repr=False)
     max_seq_length: int = field(default=-1, init=False, repr=False)
     _loaders: dict = field(default=None, init=False, repr=False)
@@ -66,8 +67,10 @@ class SafeDataModule(DataModule):
     def _tokenizer_cache_name(self) -> str:
         return self.tokenizer.model_name if self.tokenizer else "default"
 
-    def _split_dir(self, dataset_id: str, ratio_pct: int) -> Path:
-        return self.cache_dir / self._tokenizer_cache_name() / dataset_id / "splits" / f"r{ratio_pct}"
+    def _split_dir(self, dataset_id: str, label_ratio: float, unlabel_ratio: float) -> Path:
+        label_pct = int(round(label_ratio * 100))
+        unlabel_pct = int(round(unlabel_ratio * 100))
+        return self.cache_dir / self._tokenizer_cache_name() / dataset_id / "splits" / f"l{label_pct}_u{unlabel_pct}"
 
     def _val_dir(self, dataset_id: str) -> Path:
         return self.cache_dir / self._tokenizer_cache_name() / dataset_id / "val"
@@ -81,12 +84,12 @@ class SafeDataModule(DataModule):
             shuffle=shuffle,
         )
 
-    def _combine_datasets(self, datasets: list):
+    def _combine_datasets(self, datasets: list, weights: list[float] | None = None):
         from litdata.streaming import CombinedStreamingDataset
 
         if len(datasets) == 1:
             return datasets[0]
-        return CombinedStreamingDataset(datasets, seed=self.seed)
+        return CombinedStreamingDataset(datasets=datasets, seed=self.seed, weights=weights, iterate_over_all=False)
 
     def _streaming_dataloader(self, dataset, *, num_workers: int, drop_last: bool):
         from litdata.streaming import StreamingDataLoader
@@ -99,23 +102,59 @@ class SafeDataModule(DataModule):
             drop_last=drop_last,
         )
 
-    def _build_train_dataset_groups(self) -> dict[str, list]:
-        grouped_datasets = {"D_std": [], "D_harmful": [], "D_unlabeled": []}
-        for ds_id, cfg in self._configs.items():
-            ratio_pct = int(round(cfg.get("label_ratio", 1.0) * 100))
-            split_dir = self._split_dir(ds_id, ratio_pct)
-            role = cfg.get("role", "std")
-            train_split_name = "D_std" if role == "std" else "D_harmful"
+    def _normalized_dataset_config(self, dataset_id: str, cfg: dict) -> dict:
+        label_ratio = cfg.get("label_ratio", 1.0)
+        unlabel_ratio = cfg.get("unlabel_ratio", 1.0 - label_ratio)
+        label_weight = cfg.get("label_weight", 1.0)
+        unlabel_weight = cfg.get("unlabel_weight", 1.0)
+        role = cfg.get("role", "std")
 
-            if ratio_pct > 0:
-                grouped_datasets[train_split_name].append(
+        if role not in {"std", "harmful"}:
+            raise ValueError(f"Dataset '{dataset_id}' has invalid role '{role}'")
+        if not 0.0 <= label_ratio <= 1.0:
+            raise ValueError(f"Dataset '{dataset_id}' label_ratio must be between 0 and 1, got {label_ratio}")
+        if not 0.0 <= unlabel_ratio <= 1.0:
+            raise ValueError(f"Dataset '{dataset_id}' unlabel_ratio must be between 0 and 1, got {unlabel_ratio}")
+        if label_ratio + unlabel_ratio > 1.0:
+            raise ValueError(
+                f"Dataset '{dataset_id}' label_ratio + unlabel_ratio must be <= 1, got {label_ratio + unlabel_ratio}"
+            )
+        if label_weight <= 0:
+            raise ValueError(f"Dataset '{dataset_id}' label_weight must be > 0, got {label_weight}")
+        if unlabel_weight <= 0:
+            raise ValueError(f"Dataset '{dataset_id}' unlabel_weight must be > 0, got {unlabel_weight}")
+
+        return {
+            **cfg,
+            "role": role,
+            "label_ratio": label_ratio,
+            "unlabel_ratio": unlabel_ratio,
+            "label_weight": label_weight,
+            "unlabel_weight": unlabel_weight,
+        }
+
+    def _build_train_dataset_groups(self) -> dict[str, dict[str, list]]:
+        grouped_datasets = {
+            "D_std": {"datasets": [], "weights": []},
+            "D_harmful": {"datasets": [], "weights": []},
+            "D_unlabeled": {"datasets": [], "weights": []},
+        }
+        for ds_id, raw_cfg in self._configs.items():
+            cfg = self._normalized_dataset_config(ds_id, raw_cfg)
+            split_dir = self._split_dir(ds_id, cfg["label_ratio"], cfg["unlabel_ratio"])
+            train_split_name = "D_std" if cfg["role"] == "std" else "D_harmful"
+
+            if cfg["label_ratio"] > 0:
+                grouped_datasets[train_split_name]["datasets"].append(
                     self._streaming_dataset(split_dir / "labeled_train", shuffle=True)
                 )
+                grouped_datasets[train_split_name]["weights"].append(cfg["label_weight"])
 
-            if ratio_pct < 100:
-                grouped_datasets["D_unlabeled"].append(
+            if cfg["unlabel_ratio"] > 0:
+                grouped_datasets["D_unlabeled"]["datasets"].append(
                     self._streaming_dataset(split_dir / "unlabeled_train", shuffle=True)
                 )
+                grouped_datasets["D_unlabeled"]["weights"].append(cfg["unlabel_weight"])
         return grouped_datasets
 
     def _build_val_datasets(self) -> dict[str, object]:
@@ -132,7 +171,7 @@ class SafeDataModule(DataModule):
                 val_datasets[split_name] = self._combine_datasets(datasets)
         return val_datasets
 
-    def _build_val_loader_iterables(self, *, batch_size: Optional[int] = None, drop_last: bool = False) -> dict[str, object]:
+    def _build_val_loader_iterables(self, *, batch_size: int | None = None, drop_last: bool = False) -> dict[str, object]:
         effective_batch_size = self.batch_size if batch_size is None else batch_size
 
         class _DatasetBatchIterable:
@@ -164,26 +203,23 @@ class SafeDataModule(DataModule):
 
     def initialize_loaders(self) -> dict[str, object]:
         self.setup()
-        val_loaders = self.val_dataloaders()
-        primary_val_loader = val_loaders.get("D_std")
-        if primary_val_loader is None and val_loaders:
-            primary_val_loader = next(iter(val_loaders.values()))
         return {
             "train_loaders": dict(self._loaders or {}),
-            "val_loaders": val_loaders,
-            "primary_val_loader": primary_val_loader,
+            "val_loaders": self.val_dataloaders(),
         }
 
     def prepare_data(self):
         """Tokenize and split each dataset. Idempotent."""
         from safemoe.data.prepare import prepare_dataset
 
-        for ds_id, cfg in self._configs.items():
+        for ds_id, raw_cfg in self._configs.items():
+            cfg = self._normalized_dataset_config(ds_id, raw_cfg)
             prepare_dataset(
                 dataset_id=ds_id,
                 data_path=Path(cfg["path"]),
                 text_column=cfg.get("text_column", "text"),
-                label_ratio=cfg.get("label_ratio", 1.0),
+                label_ratio=cfg["label_ratio"],
+                unlabel_ratio=cfg["unlabel_ratio"],
                 tokenizer=self.tokenizer,
                 cache_dir=self.cache_dir,
                 seed=self.seed,
@@ -193,17 +229,17 @@ class SafeDataModule(DataModule):
 
     def setup(self, stage: str = "") -> None:
         train_datasets = self._build_train_dataset_groups()
-        loader_count = sum(1 for datasets in train_datasets.values() if datasets)
+        loader_count = sum(1 for group in train_datasets.values() if group["datasets"])
         num_workers = self._effective_num_workers(loader_count=loader_count)
 
         self._loaders = {
             split_name: self._streaming_dataloader(
-                self._combine_datasets(datasets),
+                self._combine_datasets(group["datasets"], group["weights"]),
                 num_workers=num_workers,
                 drop_last=True,
             )
-            for split_name, datasets in train_datasets.items()
-            if datasets
+            for split_name, group in train_datasets.items()
+            if group["datasets"]
         }
         self._val_datasets = None
 

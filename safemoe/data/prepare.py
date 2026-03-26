@@ -2,16 +2,16 @@
 
 Two-phase prepare:
   Phase 1 (expensive, once per dataset+tokenizer): tokenize all samples individually
-  Phase 2 (cheap, re-run when ratio changes): split by label_ratio and repack with TokensLoader
+  Phase 2 (cheap, re-run when ratios change): split by label_ratio and unlabel_ratio and repack with TokensLoader
 
 Cache layout:
   data/.cache/{tokenizer_name}/{dataset_id}/
       manifest.json
-      samples_train/       # Phase 1: per-sample token storage (no TokensLoader)
-      val/                 # Phase 1: TokensLoader format (full val, no ratio split)
-      splits/r{pct}/
-          labeled_train/   # Phase 2: TokensLoader format, first ratio% samples
-          unlabeled_train/ # Phase 2: TokensLoader format, remaining samples
+      samples_train/          # Phase 1: per-sample token storage (no TokensLoader)
+      val/                    # Phase 1: TokensLoader format (full val, no ratio split)
+      splits/l{label_pct}_u{unlabel_pct}/
+          labeled_train/      # Phase 2: TokensLoader format, first label_ratio samples
+          unlabeled_train/    # Phase 2: TokensLoader format, next unlabel_ratio samples
 """
 
 from __future__ import annotations
@@ -299,6 +299,7 @@ def prepare_dataset(
     seed: int = 42,
     num_workers: int = 4,
     chunk_bytes: str = "200MB",
+    unlabel_ratio: Optional[float] = None,
     # test injection hooks
     train_texts: Optional[list[str]] = None,
     val_texts: Optional[list[str]] = None,
@@ -306,6 +307,17 @@ def prepare_dataset(
     """Two-phase prepare for a single dataset. Returns manifest dict."""
     data_path = Path(data_path)
     cache_dir = Path(cache_dir)
+    if unlabel_ratio is None:
+        unlabel_ratio = 1.0 - label_ratio
+    if not 0.0 <= label_ratio <= 1.0:
+        raise ValueError(f"label_ratio must be between 0 and 1, got {label_ratio}")
+    if not 0.0 <= unlabel_ratio <= 1.0:
+        raise ValueError(f"unlabel_ratio must be between 0 and 1, got {unlabel_ratio}")
+    if label_ratio + unlabel_ratio > 1.0:
+        raise ValueError(
+            f"label_ratio + unlabel_ratio must be <= 1, got {label_ratio + unlabel_ratio}"
+        )
+
     tokenizer_name = tokenizer.model_name if hasattr(tokenizer, "model_name") else "default"
     base_dir = cache_dir / tokenizer_name / dataset_id
 
@@ -422,21 +434,23 @@ def prepare_dataset(
             seed=seed,
         )
 
-    # ---- Phase 2: split by label_ratio (idempotent) -----------------------
-    ratio_pct = int(round(label_ratio * 100))
-    split_dir = base_dir / "splits" / f"r{ratio_pct}"
+    # ---- Phase 2: split by label_ratio and unlabel_ratio (idempotent) -----
+    label_pct = int(round(label_ratio * 100))
+    unlabel_pct = int(round(unlabel_ratio * 100))
+    split_dir = base_dir / "splits" / f"l{label_pct}_u{unlabel_pct}"
     labeled_train_dir = split_dir / "labeled_train"
     unlabeled_train_dir = split_dir / "unlabeled_train"
 
     manifest = read_manifest(base_dir)
     n = manifest["num_train_samples"]
-    split_idx = int(n * label_ratio)
+    label_end = int(n * label_ratio)
+    unlabel_end = label_end + int(n * unlabel_ratio)
 
     # Write labeled_train/
-    if split_idx > 0 and not _dataset_is_ready(labeled_train_dir):
+    if label_end > 0 and not _dataset_is_ready(labeled_train_dir):
         _reset_incomplete_output_dir(labeled_train_dir)
         labeled_train_dir.mkdir(parents=True, exist_ok=True)
-        chunks = split_contiguous(range(split_idx), min(num_workers, split_idx))
+        chunks = split_contiguous(range(label_end), min(num_workers, label_end))
         if chunks:
             optimize(
                 fn=partial(_yield_range, input_dir=str(samples_train_dir)),
@@ -449,11 +463,11 @@ def prepare_dataset(
             )
 
     # Write unlabeled_train/
-    if split_idx < n and not _dataset_is_ready(unlabeled_train_dir):
+    unlabeled_count = unlabel_end - label_end
+    if unlabeled_count > 0 and not _dataset_is_ready(unlabeled_train_dir):
         _reset_incomplete_output_dir(unlabeled_train_dir)
         unlabeled_train_dir.mkdir(parents=True, exist_ok=True)
-        remaining = n - split_idx
-        chunks = split_contiguous(range(split_idx, n), min(num_workers, remaining))
+        chunks = split_contiguous(range(label_end, unlabel_end), min(num_workers, unlabeled_count))
         if chunks:
             optimize(
                 fn=partial(_yield_range, input_dir=str(samples_train_dir)),

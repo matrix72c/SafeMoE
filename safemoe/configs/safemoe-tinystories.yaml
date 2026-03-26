@@ -55,13 +55,18 @@ data:
         text_column: text
         role: std
         label_ratio: 0.25
+        unlabel_ratio: 0.75
+        label_weight: 1.0
+        unlabel_weight: 1.0
       tinystories_es:
         path: data/multilingual-tinystories/es
         text_column: text
         role: harmful
-        label_ratio: 1.0
+        label_ratio: 0.99
+        unlabel_ratio: 0.01
+        label_weight: 1.0
+        unlabel_weight: 1.0
 
-# SGTM training loop fields (Phase 3) — top-level setup() params:
 upsample_std: 1
 upsample_harmful: 1
 upsample_unlabeled: 1
