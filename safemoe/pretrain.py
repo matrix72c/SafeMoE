@@ -15,13 +15,13 @@ from typing import Dict, List, NamedTuple, Optional, Union
 
 import lightning as L
 import torch
-import yaml
 import torch.nn as nn
 import torch.nn.functional as F
+import yaml
 from lightning.fabric.strategies import FSDPStrategy
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from lightning.fabric.utilities.throughput import ThroughputMonitor, measure_flops
 from torch import Tensor
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.utils.data import DataLoader
 from torchmetrics.aggregation import RunningMean
 from typing_extensions import Literal
@@ -56,11 +56,6 @@ from safemoe.config import SafeMoEConfig
 from safemoe.data.datamodule import SafeDataModule
 from safemoe.masking import ActivationMasker, GradientMasker, HarmfulParamRegistry
 from safemoe.model import SafeMoELayer
-from safemoe.observability import (
-    RoutingObservabilityCollector,
-    assert_routing_parity,
-    write_routing_artifacts,
-)
 from safemoe.surgery import setup as surgery_setup
 
 # SGTM: split labels for 3-path SGTM branching
@@ -201,16 +196,20 @@ def collect_warmup_routing_mass(model: nn.Module) -> torch.Tensor:
 
 
 @dataclass(frozen=True)
-class ValidationRoutingDetails:
-    total_dispatches: int
+class SplitValidationResult:
+    loss: torch.Tensor
+    ppl: float
+    dispatch_count: int
     harmful_dispatches: int
     routing_harmful_frac: float
+    batches_evaluated: int
 
 
 @dataclass(frozen=True)
-class ValidationResult:
-    loss: torch.Tensor
-    routing: ValidationRoutingDetails
+class ValidationSummary:
+    by_split: dict[str, SplitValidationResult]
+    scalar_metrics: dict[str, float]
+    routing_margin: Optional[float]
 
 
 def _unwrap_safemoe_model(model: nn.Module) -> nn.Module:
@@ -328,6 +327,110 @@ def _reduce_routing_counts(
     torch.distributed.all_reduce(dispatch_tensor)
     torch.distributed.all_reduce(harmful_tensor)
     return int(dispatch_tensor.item()), int(harmful_tensor.item())
+
+
+@torch.no_grad()
+def _evaluate_validation_split(
+    fabric: L.Fabric,
+    model: nn.Module,
+    val_dataloader: DataLoader,
+    split_name: str,
+    max_iters: int,
+    verbose: bool = True,
+) -> SplitValidationResult:
+    fabric.barrier()
+    if verbose:
+        fabric.print(f"Validating {split_name} ...")
+    was_training = model.training
+    model.eval()
+
+    prev_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
+    total_loss = 0.0
+    count = 0
+    total_dispatches = 0
+    harmful_dispatches = 0
+    unwrapped_model = _unwrap_safemoe_model(model)
+    harmful_expert_indices = list(getattr(unwrapped_model.config, "harmful_expert_indices", []))
+    try:
+        for k, batch in enumerate(val_dataloader):
+            if k >= max_iters:
+                break
+            input_ids = batch[:, 0 : model.max_seq_length].contiguous().long().to(fabric.device)
+            targets = batch[:, 1 : (model.max_seq_length + 1)].contiguous().long().to(fabric.device)
+            logits = model(input_ids)
+            batch_total_dispatches, batch_harmful_dispatches = _collect_cached_routing_counts(
+                model,
+                harmful_expert_indices,
+            )
+            total_dispatches += batch_total_dispatches
+            harmful_dispatches += batch_harmful_dispatches
+            loss = chunked_cross_entropy(logits, targets)
+            total_loss += loss.item()
+            count += 1
+    finally:
+        torch.set_default_dtype(prev_dtype)
+        model.train(was_training)
+        fabric.barrier()
+
+    val_loss = torch.tensor(total_loss / max(count, 1), device=fabric.device)
+    total_dispatches, harmful_dispatches = _reduce_routing_counts(
+        fabric,
+        total_dispatches=total_dispatches,
+        harmful_dispatches=harmful_dispatches,
+    )
+    routing_harmful_frac = harmful_dispatches / max(total_dispatches, 1)
+    return SplitValidationResult(
+        loss=val_loss,
+        ppl=math.exp(val_loss.item()),
+        dispatch_count=total_dispatches,
+        harmful_dispatches=harmful_dispatches,
+        routing_harmful_frac=routing_harmful_frac,
+        batches_evaluated=count,
+    )
+
+
+@torch.no_grad()
+def collect_validation_summary(
+    fabric: L.Fabric,
+    model: nn.Module,
+    val_loaders: dict[str, DataLoader],
+    max_iters: int,
+    verbose: bool = True,
+    metric_prefix: str = "",
+) -> ValidationSummary:
+    by_split: dict[str, SplitValidationResult] = {}
+    scalar_metrics: dict[str, float] = {}
+    for split_name, loader in val_loaders.items():
+        split_result = _evaluate_validation_split(
+            fabric=fabric,
+            model=model,
+            val_dataloader=loader,
+            split_name=split_name,
+            max_iters=max_iters,
+            verbose=verbose,
+        )
+        by_split[split_name] = split_result
+        scalar_metrics[f"{metric_prefix}val_loss_{split_name}"] = split_result.loss.item()
+        scalar_metrics[f"{metric_prefix}val_ppl_{split_name}"] = split_result.ppl
+        scalar_metrics[f"{metric_prefix}dispatch_count_{split_name}"] = split_result.dispatch_count
+        scalar_metrics[f"{metric_prefix}routing_harmful_frac_{split_name}"] = split_result.routing_harmful_frac
+
+    routing_margin = None
+    if "D_std" in by_split and "D_harmful" in by_split:
+        routing_margin = by_split["D_harmful"].routing_harmful_frac - by_split["D_std"].routing_harmful_frac
+        scalar_metrics[f"{metric_prefix}routing_margin"] = routing_margin
+
+    return ValidationSummary(by_split=by_split, scalar_metrics=scalar_metrics, routing_margin=routing_margin)
+
+
+def _format_validation_status(summary: ValidationSummary) -> str:
+    if not summary.by_split:
+        return "n/a"
+    return ", ".join(
+        f"{split_name}={split_result.loss.item():.3f}"
+        for split_name, split_result in summary.by_split.items()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -693,10 +796,6 @@ def main(
     optimizer = _build_optimizer(fabric, optimizer, registry)
 
     data_loaders = initialize_data_loaders(data, tokenizer, train, model.max_seq_length)
-    val_dataloader = fabric.setup_dataloaders(data_loaders["primary_val_loader"])
-
-    # SGTM EVAL-03: extract per-split val loaders for mid-training ablation evaluation
-    # val_loaders contains {"D_std": DataLoader, "D_harmful": DataLoader}
     val_loaders_for_eval = {
         split_name: fabric.setup_dataloaders(loader)
         for split_name, loader in data_loaders["val_loaders"].items()
@@ -742,7 +841,6 @@ def main(
         num_nodes=num_nodes,
         state=state,
         data=data,
-        val_dataloader=val_dataloader,
         out_dir=out_dir,
         tokenizer_dir=tokenizer_dir,
         train=train,
@@ -797,7 +895,6 @@ def fit(
     devices: int,
     state: dict,
     data: SafeDataModule,
-    val_dataloader: DataLoader,
     out_dir: Path,
     tokenizer_dir: Optional[Path],
     train: TrainArgs,
@@ -812,8 +909,7 @@ def fit(
     upsample_unlabeled: float = 1.0,
     # SGTM: EVAL-03 — mid-training ablation evaluation
     registry: Optional["HarmfulParamRegistry"] = None,
-    val_loaders: Optional[dict] = None,
-    routing_parity_check: bool = False,
+    val_loaders: Optional[dict[str, DataLoader]] = None,
     stage: Literal["transfer", "warmup"] = "transfer",
     warmup_routing_loss_weight: float = 0.1,
     warmup_harmful_mass_floor: float = 0.6,
@@ -822,13 +918,19 @@ def fit(
     model = state["model"]
     optimizer = state["optimizer"]
 
+    if val_loaders is None:
+        raise ValueError("fit() requires split-aware val_loaders")
+
+    latest_validation_summary: Optional[ValidationSummary] = None
     if eval.initial_validation:
-        val_result = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
-        val_loss = f"{val_result.loss.item():.3f}"
+        initial_summary = collect_validation_summary(fabric, model, val_loaders, max_iters=eval.max_iters)
+        fabric.log_dict(initial_summary.scalar_metrics, step=max(state["iter_num"] - 1, 0))
+        validation_status = _format_validation_status(initial_summary)
+        latest_validation_summary = initial_summary
     else:
         fabric.print("Verifying settings ...")
-        validate(fabric, model, val_dataloader, max_iters=2, verbose=False)  # sanity check
-        val_loss = "n/a"
+        collect_validation_summary(fabric, model, val_loaders, max_iters=2, verbose=False)
+        validation_status = "n/a"
 
     throughput = ThroughputMonitor(fabric, window_size=5)
 
@@ -857,7 +959,6 @@ def fit(
         max_iters = max_tokens_per_device // tokens_per_iter
         max_steps = math.ceil(max_iters / accum_iters)
     log_iter_interval = train.log_interval * accum_iters
-    initial_iter = state["iter_num"]
     initial_step = state["step_count"]
 
     # SGTM: three split iterators replace single CycleIterator (Pattern 1)
@@ -992,12 +1093,10 @@ def fit(
                     "D_unlabeled": "loss_D_unlabeled",
                 }[split_label]
                 metrics[loss_key] = loss_val
-            if isinstance(val_loss, float):
-                val_loss = f"{val_loss:.3f}"
             fabric.print(
                 f"step {state['step_count']} [{split_label}] | iter {metrics['iter']} |"
                 f" loss: {metrics['loss']:.3f},"
-                f" val: {val_loss} |"
+                f" val: {validation_status} |"
                 f" iter time: {metrics['iter_time'] * 1000:.2f} ms"
                 f" remaining time: {timedelta(seconds=int(metrics['remaining_time']))!s}"
             )
@@ -1006,15 +1105,15 @@ def fit(
             metrics.update(throughput_metrics)
             fabric.log_dict(metrics, step=state["iter_num"] - 1)
 
-        if val_dataloader is not None and state["step_count"] % eval.interval == 0:
+        if state["step_count"] % eval.interval == 0:
             t0 = time.perf_counter()
-            val_result = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
-            val_loss = val_result.loss.item()
+            validation_summary = collect_validation_summary(fabric, model, val_loaders, max_iters=eval.max_iters)
+            latest_validation_summary = validation_summary
+            validation_status = _format_validation_status(validation_summary)
             td = time.perf_counter() - t0
 
-            fabric.print(f"iter {state['iter_num']}: val loss {val_loss:.4f}, val time: {td * 1000:.2f} ms")
-            metrics = {"val_loss": val_loss, "val_ppl": math.exp(val_loss)}
-            fabric.log_dict(metrics, step=state["iter_num"] - 1)
+            fabric.print(f"iter {state['iter_num']}: val {validation_status}, val time: {td * 1000:.2f} ms")
+            fabric.log_dict(validation_summary.scalar_metrics, step=state["iter_num"] - 1)
             fabric.barrier()
 
         if train.save_interval is not None and state["step_count"] % train.save_interval == 0:
@@ -1026,26 +1125,22 @@ def fit(
                 checkpoint_dir / "lit_model.pth",
             )
             # SGTM EVAL-03: mid-training ablation evaluation at each checkpoint
-            if registry is not None and val_loaders is not None:
-                evaluate_with_ablation(
-                    fabric, model, registry, val_loaders,
-                    iter_num=state["iter_num"], eval_args=eval,
-                )
-                emit_routing_observability(
-                    fabric=fabric,
-                    model=model,
-                    val_loaders=val_loaders,
-                    output_dir=checkpoint_dir,
-                    run_parity_check=routing_parity_check,
+            if registry is not None:
+                ablated_summary = evaluate_with_ablation(
+                    fabric,
+                    model,
+                    registry,
+                    val_loaders,
+                    iter_num=state["iter_num"],
+                    eval_args=eval,
                 )
 
     # Final validation
     if eval.final_validation:
-        val_result = validate(fabric, model, val_dataloader, max_iters=eval.max_iters)
-        val_loss = val_result.loss
-        metrics = {"val_loss": val_loss, "val_ppl": math.exp(val_loss.item())}
-        fabric.log_dict(metrics, step=state["iter_num"])
-        fabric.print(f"Final evaluation | val loss: {val_loss.item():.3f} | val ppl: {math.exp(val_loss.item()):.3f}")
+        final_summary = collect_validation_summary(fabric, model, val_loaders, max_iters=eval.max_iters)
+        latest_validation_summary = final_summary
+        fabric.log_dict(final_summary.scalar_metrics, step=state["iter_num"])
+        fabric.print(f"Final evaluation | val { _format_validation_status(final_summary) }")
 
 
 # ---------------------------------------------------------------------------
@@ -1057,149 +1152,35 @@ def evaluate_with_ablation(
     fabric: L.Fabric,
     model: nn.Module,
     registry: "HarmfulParamRegistry",
-    val_loaders: dict,
+    val_loaders: dict[str, DataLoader],
     iter_num: int,
     eval_args: Optional["EvalArgs"] = None,
-) -> None:
-    """Temporarily ablate theta_harmful, run per-split validation, restore weights.
-
-    Implements EVAL-03: called at save_interval checkpoints to track isolation progress.
-    val_loaders is {"D_std": DataLoader, "D_harmful": DataLoader} — no D_unlabeled entry.
-
-    The try/finally guard guarantees weights are restored even if validate() raises.
-    model.train() is explicitly called in finally to prevent eval mode leaking into
-    the training loop (validate() sets eval mode but this function owns the restore).
-    """
+) -> ValidationSummary:
     harmful_params = registry.parameters_by_type("theta_harmful")
     saved = [p.data.clone() for p in harmful_params]
+    was_training = model.training
     max_iters = eval_args.max_iters if eval_args is not None else 100
     try:
         for p in harmful_params:
             p.data.zero_()
-        metrics: dict = {}
-        for split_name, loader in val_loaders.items():
-            # val_loaders has D_std and D_harmful only — no D_unlabeled (user decision)
-            val_result = validate(fabric, model, loader, max_iters=max_iters, verbose=False)
-            metrics[f"ablated_val_ppl_{split_name}"] = math.exp(val_result.loss.item())
+        summary = collect_validation_summary(
+            fabric,
+            model,
+            val_loaders,
+            max_iters=max_iters,
+            verbose=False,
+            metric_prefix="ablated_",
+        )
     finally:
         for p, saved_data in zip(harmful_params, saved):
             p.data.copy_(saved_data)
-        model.train()  # restore training mode — validate() sets eval but we own the restore
-    fabric.log_dict(metrics, step=iter_num)
+        model.train(was_training)
+    fabric.log_dict(summary.scalar_metrics, step=iter_num)
     fabric.print(
         f"Ablation eval (iter {iter_num}): "
-        + ", ".join(f"{k}={v:.3f}" for k, v in metrics.items())
+        + ", ".join(f"{k}={v}" for k, v in summary.scalar_metrics.items())
     )
-
-
-def emit_routing_observability(
-    fabric: L.Fabric,
-    model: nn.Module,
-    val_loaders: dict,
-    output_dir: Path,
-    logged_metrics: Optional[dict] = None,
-    run_parity_check: bool = False,
-) -> dict:
-    observed_metrics: dict[str, float] = {}
-    for split_name, loader in val_loaders.items():
-        result = validate(
-            fabric,
-            model,
-            loader,
-            max_iters=1,
-            verbose=False,
-        )
-        observed_metrics[f"dispatch_count_{split_name}"] = result.routing.total_dispatches
-        observed_metrics[f"routing_harmful_frac_{split_name}"] = result.routing.routing_harmful_frac
-    write_routing_artifacts(output_dir, observed_metrics, markdown_title="Routing Observability")
-    if run_parity_check:
-        collector = RoutingObservabilityCollector(model, model.config.harmful_expert_indices)
-        split_runners = {
-            split_name: (
-                lambda loader=loader: validate(
-                    fabric,
-                    model,
-                    loader,
-                    max_iters=sys.maxsize,
-                    verbose=False,
-                ).loss
-            )
-            for split_name, loader in val_loaders.items()
-        }
-        parity_metrics = collector.collect_splits(split_runners)
-        assert_routing_parity(
-            logged_metrics=logged_metrics or observed_metrics,
-            observed_metrics=parity_metrics,
-            output_dir=output_dir,
-        )
-    return observed_metrics
-
-
-# ---------------------------------------------------------------------------
-# validate() — reused from litgpt unchanged (no masking during validation)
-# ---------------------------------------------------------------------------
-
-@torch.no_grad()
-def validate(
-    fabric: L.Fabric,
-    model: nn.Module,
-    val_dataloader: DataLoader,
-    max_iters: int,
-    verbose: bool = True,
-) -> ValidationResult:
-    fabric.barrier()
-    if verbose:
-        fabric.print("Validating ...")
-    was_training = model.training
-    model.eval()
-
-    # Override default dtype so the Fabric HalfPrecision plugin's convert_output
-    # performs a bf16→bf16 no-op rather than a bf16→fp32 copy that would OOM on
-    # large-vocabulary models (e.g. Qwen ~152k vocab, ~46 GB logits in bf16).
-    prev_dtype = torch.get_default_dtype()
-    torch.set_default_dtype(torch.bfloat16)
-    total_loss = 0.0
-    count = 0
-    total_dispatches = 0
-    harmful_dispatches = 0
-    unwrapped_model = _unwrap_safemoe_model(model)
-    harmful_expert_indices = list(getattr(unwrapped_model.config, "harmful_expert_indices", []))
-    try:
-        for k, batch in enumerate(val_dataloader):
-            if k >= max_iters:
-                break
-            input_ids = batch[:, 0 : model.max_seq_length].contiguous().long().to(fabric.device)
-            targets = batch[:, 1 : (model.max_seq_length + 1)].contiguous().long().to(fabric.device)
-            logits = model(input_ids)
-            batch_total_dispatches, batch_harmful_dispatches = _collect_cached_routing_counts(
-                model,
-                harmful_expert_indices,
-            )
-            total_dispatches += batch_total_dispatches
-            harmful_dispatches += batch_harmful_dispatches
-            loss = chunked_cross_entropy(logits, targets)
-            total_loss += loss.item()
-            count += 1
-    finally:
-        torch.set_default_dtype(prev_dtype)
-        model.train(was_training)
-        fabric.barrier()
-
-    val_loss = torch.tensor(total_loss / max(count, 1), device=fabric.device)
-    total_dispatches, harmful_dispatches = _reduce_routing_counts(
-        fabric,
-        total_dispatches=total_dispatches,
-        harmful_dispatches=harmful_dispatches,
-    )
-    routing_harmful_frac = harmful_dispatches / max(total_dispatches, 1)
-    return ValidationResult(
-        loss=val_loss,
-        routing=ValidationRoutingDetails(
-            total_dispatches=total_dispatches,
-            harmful_dispatches=harmful_dispatches,
-            routing_harmful_frac=routing_harmful_frac,
-        ),
-    )
+    return summary
 
 
 # ---------------------------------------------------------------------------

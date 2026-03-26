@@ -1,9 +1,9 @@
 """safemoe/evaluate.py — Full checkpoint evaluation and routing analysis"""
 
 import json
-import math
 import os
 import sys
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,7 +11,6 @@ from typing import Any, Mapping, Optional
 
 import lightning as L
 import torch
-import warnings
 import yaml
 from lightning.fabric.plugins.precision.fsdp import FSDPPrecision
 from lightning.fabric.strategies import FSDPStrategy
@@ -20,8 +19,7 @@ from torch.utils.data import DataLoader
 from litgpt.model import GPT, Block
 from litgpt.utils import check_valid_checkpoint_dir, lazy_load, parse_devices
 from safemoe.config import SafeMoEConfig
-from safemoe.pretrain import validate
-
+from safemoe.pretrain import ValidationSummary, collect_validation_summary
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -81,6 +79,29 @@ def _merge_dicts(existing: dict[str, Any], updates: dict[str, Any]) -> dict[str,
     return merged
 
 
+def _normalize_metrics_payload(metrics: Any) -> dict[str, Any]:
+    if not isinstance(metrics, dict):
+        return {}
+
+    normalized = dict(metrics)
+    legacy_original = {
+        key: normalized.pop(key)
+        for key in ("perplexity", "routing")
+        if isinstance(normalized.get(key), dict)
+    }
+    if legacy_original and "original" not in normalized:
+        normalized["original"] = legacy_original
+
+    ablated = normalized.get("ablated")
+    if isinstance(ablated, dict) and isinstance(ablated.get("metrics"), dict):
+        ablated_metrics = ablated["metrics"]
+        normalized["ablated"] = {
+            "checkpoint": ablated.get("checkpoint"),
+            **ablated_metrics,
+        }
+    return normalized
+
+
 def _checkpoint_relpath(ckpt_dir: Path, results_root: Path) -> str:
     ckpt_dir = Path(ckpt_dir).resolve()
     results_root = Path(results_root).resolve()
@@ -133,20 +154,19 @@ def _write_checkpoint_metrics(ckpt_dir: Path, metrics: dict[str, Any]) -> Path:
     if existing_record and not isinstance(existing_record, dict):
         raise TypeError(f"Expected mapping for results record {record_key!r}")
 
-    checkpoint_relpath = _checkpoint_relpath(ckpt_dir, results_root)
     checkpoint_run_name = _load_checkpoint_run_name(ckpt_dir)
     key_parts = Path(record_key).parts
     record = _merge_dicts(
         {
             'checkpoint_dir': str(ckpt_dir.resolve()),
-            'checkpoint_relpath': checkpoint_relpath,
-            'checkpoint_name': ckpt_dir.name,
             'run_name': checkpoint_run_name or (key_parts[0] if key_parts else ckpt_dir.name),
             'metrics': {},
         },
-        existing_record,
+        {k: v for k, v in existing_record.items() if k not in {'checkpoint_name', 'checkpoint_relpath'}},
     )
-    record['metrics'] = _merge_dicts(record.get('metrics', {}), metrics)
+    normalized_existing_metrics = _normalize_metrics_payload(record.get('metrics', {}))
+    normalized_new_metrics = _normalize_metrics_payload(metrics)
+    record['metrics'] = _merge_dicts(normalized_existing_metrics, normalized_new_metrics)
     record['updated_at'] = datetime.now(timezone.utc).isoformat()
     ledger[record_key] = record
     results_path.write_text(json.dumps(ledger, indent=2, sort_keys=True))
@@ -483,29 +503,29 @@ def _create_eval_session(
 
 
 def _compute_split_metrics(session: _EvalSession) -> tuple[dict[str, float], dict[str, float]]:
-    perplexity_metrics: dict[str, float] = {}
-    routing_metrics: dict[str, float] = {}
-    for split_name in ["D_std", "D_harmful"]:
-        loader = _prepare_eval_loader(session.fabric, session.val_loaders[split_name])
-        result = validate(
-            session.fabric,
-            session.model,
-            loader,
-            max_iters=sys.maxsize,
-            verbose=False,
-        )
-        perplexity_metrics[f"val_ppl_{split_name}"] = math.exp(result.loss.item())
-        routing_metrics[f"dispatch_count_{split_name}"] = result.routing.total_dispatches
-        routing_metrics[f"routing_harmful_frac_{split_name}"] = result.routing.routing_harmful_frac
+    prepared_val_loaders = {
+        split_name: _prepare_eval_loader(session.fabric, loader)
+        for split_name, loader in session.val_loaders.items()
+    }
+    summary = collect_validation_summary(
+        session.fabric,
+        session.model,
+        prepared_val_loaders,
+        max_iters=sys.maxsize,
+        verbose=False,
+    )
+    return _summary_to_metric_groups(summary)
 
-    if {
-        "routing_harmful_frac_D_std",
-        "routing_harmful_frac_D_harmful",
-    }.issubset(routing_metrics):
-        routing_metrics["routing_margin"] = (
-            routing_metrics["routing_harmful_frac_D_harmful"]
-            - routing_metrics["routing_harmful_frac_D_std"]
-        )
+
+def _summary_to_metric_groups(summary: ValidationSummary) -> tuple[dict[str, float], dict[str, float]]:
+    perplexity_metrics = {
+        key: value for key, value in summary.scalar_metrics.items() if key.startswith("val_ppl_")
+    }
+    routing_metrics = {
+        key: value
+        for key, value in summary.scalar_metrics.items()
+        if key.startswith("dispatch_count_") or key.startswith("routing_harmful_frac_") or key == "routing_margin"
+    }
     return perplexity_metrics, routing_metrics
 
 
@@ -540,7 +560,7 @@ def _persist_checkpoint_metrics(
 ) -> Optional[Path]:
     if session.fabric.global_rank != 0:
         return None
-    return _write_checkpoint_metrics(ckpt_dir, checkpoint_metrics)
+    return _write_checkpoint_metrics(ckpt_dir, {"original": checkpoint_metrics})
 
 
 def _build_combined_metrics_record(
@@ -557,7 +577,7 @@ def _build_combined_metrics_record(
 
     combined["ablated"] = {
         "checkpoint": _checkpoint_reference(ablated_ckpt_dir, _find_results_root(original_ckpt_dir)),
-        "metrics": ablated_metrics,
+        **ablated_metrics,
     }
     return combined
 
@@ -580,6 +600,16 @@ def _persist_combined_metrics(
             ablated_metrics=ablated_metrics,
         ),
     )
+
+
+def _extract_ablated_metrics(combined_metrics: Mapping[str, Any]) -> Optional[dict[str, dict[str, float]]]:
+    ablated = combined_metrics.get("ablated")
+    if not isinstance(ablated, dict):
+        return None
+    if isinstance(ablated.get("metrics"), dict):
+        return ablated["metrics"]
+    extracted = {key: value for key, value in ablated.items() if key in {"perplexity", "routing"} and isinstance(value, dict)}
+    return extracted or None
 
 
 def _print_summary_table(
@@ -701,7 +731,7 @@ def evaluate_checkpoint(
         num_nodes=num_nodes,
         precision=precision,
     )
-    _print_summary_table(combined_metrics["original"], combined_metrics.get("ablated", {}).get("metrics"))
+    _print_summary_table(combined_metrics["original"], _extract_ablated_metrics(combined_metrics))
     if results_path is not None:
         print(f"\nResults written to {results_path}")
     return combined_metrics
@@ -755,7 +785,7 @@ def evaluate_cli(
         num_nodes=num_nodes,
         precision=precision,
     )
-    _print_summary_table(combined_metrics["original"], combined_metrics.get("ablated", {}).get("metrics"))
+    _print_summary_table(combined_metrics["original"], _extract_ablated_metrics(combined_metrics))
     if results_path is not None:
         print(f"\nResults written to {results_path}")
 
