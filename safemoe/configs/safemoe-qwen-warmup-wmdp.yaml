@@ -1,6 +1,6 @@
 model_name: Qwen3-30B-A3B-Base
 tokenizer_dir: checkpoints/Qwen3-30B-A3B-Base
-devices: 4
+devices: auto
 num_nodes: 1
 seed: 42
 logger_name: wandb
