@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import lightning as L
 import torch
@@ -18,7 +18,7 @@ from lightning.fabric.strategies import FSDPStrategy
 from torch.utils.data import DataLoader
 
 from litgpt.model import GPT, Block
-from litgpt.utils import check_valid_checkpoint_dir, parse_devices
+from litgpt.utils import check_valid_checkpoint_dir, lazy_load, parse_devices
 from safemoe.config import SafeMoEConfig
 from safemoe.pretrain import validate
 
@@ -223,25 +223,26 @@ def _load_model(ckpt_dir: Path, fabric: Optional[L.Fabric] = None) -> tuple:
         model = fabric.setup(model)
 
     checkpoint_path = ckpt_dir / "lit_model.pth"
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    if not isinstance(checkpoint, dict):
-        raise TypeError(f"Expected checkpoint dict, got {type(checkpoint).__name__}")
 
-    if "model" in checkpoint:
-        state_dict = checkpoint["model"]
-        if not isinstance(state_dict, dict):
-            raise TypeError("Checkpoint 'model' entry must be a state_dict mapping")
-        if fabric is None:
-            model.load_state_dict(state_dict)
-        else:
-            # Under FSDP the wrapped module holds local shards; let the strategy
-            # restore the full checkpoint instead of calling load_state_dict directly.
-            fabric.load(checkpoint_path, {"model": model}, weights_only=False)
-    else:
-        if fabric is None:
-            model.load_state_dict(checkpoint)
-        else:
-            fabric.load_raw(checkpoint_path, model, weights_only=False)
+    if fabric is not None:
+        # Avoid eager CPU materialization of giant full checkpoints under FSDP.
+        # Fabric can restore both raw state_dict files and Fabric-saved wrappers
+        # without first `torch.load`-ing the entire checkpoint in this process.
+        try:
+            fabric.load(checkpoint_path, {"model": model}, strict=True, weights_only=False)
+        except (KeyError, TypeError, ValueError):
+            fabric.load_raw(checkpoint_path, model, strict=True, weights_only=False)
+        model.eval()
+        return model, config
+
+    checkpoint = lazy_load(checkpoint_path)
+    if not isinstance(checkpoint, Mapping):
+        raise TypeError(f"Expected checkpoint mapping, got {type(checkpoint).__name__}")
+
+    state_dict = checkpoint.get("model", checkpoint)
+    if not isinstance(state_dict, Mapping):
+        raise TypeError("Checkpoint model weights must be a state_dict mapping")
+    model.load_state_dict(state_dict)
     model.eval()
     return model, config
 
