@@ -175,12 +175,6 @@ def _build_warmup_surgery_args(
     )
 
 
-def active_split_labels(stage: Literal["transfer", "warmup"]) -> List[str]:
-    if stage == "warmup":
-        return ["D_std", "D_harmful"]
-    return list(SPLIT_LABELS)
-
-
 def warmup_routing_loss(
     harmful_mass: torch.Tensor,
     split_label: str,
@@ -867,7 +861,7 @@ def fit(
     initial_step = state["step_count"]
 
     # SGTM: three split iterators replace single CycleIterator (Pattern 1)
-    active_labels = [l for l in active_split_labels(stage) if l in data._loaders]
+    active_labels = [l for l in list(SPLIT_LABELS) if l in data._loaders]
     split_iters = {label: CycleIterator(data.get_loader(label)) for label in active_labels}
     split_weights = {
         "D_std": upsample_std,
