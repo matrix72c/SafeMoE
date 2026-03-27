@@ -65,7 +65,9 @@ class SafeDataModule(DataModule):
         self.max_seq_length = max_seq_length + 1  # +1 for next-token target
 
     def _tokenizer_cache_name(self) -> str:
-        return self.tokenizer.model_name if self.tokenizer else "default"
+        if self.tokenizer and hasattr(self.tokenizer, "model_name"):
+            return self.tokenizer.model_name
+        return "default"
 
     def _split_dir(self, dataset_id: str, label_ratio: float, unlabel_ratio: float) -> Path:
         label_pct = int(round(label_ratio * 100))
@@ -108,6 +110,10 @@ class SafeDataModule(DataModule):
         label_weight = cfg.get("label_weight", 1.0)
         unlabel_weight = cfg.get("unlabel_weight", 1.0)
         role = cfg.get("role", "std")
+        prepare_mode = cfg.get("prepare_mode", "eager")
+        train_is_shuffled = cfg.get("train_is_shuffled", False)
+        val_strategy = cfg.get("val_strategy", "synthetic")
+        scan_batch_size = cfg.get("scan_batch_size", 8192)
 
         if role not in {"std", "harmful"}:
             raise ValueError(f"Dataset '{dataset_id}' has invalid role '{role}'")
@@ -119,10 +125,36 @@ class SafeDataModule(DataModule):
             raise ValueError(
                 f"Dataset '{dataset_id}' label_ratio + unlabel_ratio must be <= 1, got {label_ratio + unlabel_ratio}"
             )
-        if label_weight <= 0:
-            raise ValueError(f"Dataset '{dataset_id}' label_weight must be > 0, got {label_weight}")
-        if unlabel_weight <= 0:
-            raise ValueError(f"Dataset '{dataset_id}' unlabel_weight must be > 0, got {unlabel_weight}")
+        if label_ratio > 0 and label_weight <= 0:
+            raise ValueError(
+                f"Dataset '{dataset_id}' label_weight must be > 0 when label_ratio > 0, got {label_weight}"
+            )
+        if label_ratio == 0 and label_weight < 0:
+            raise ValueError(
+                f"Dataset '{dataset_id}' label_weight must be >= 0 when label_ratio == 0, got {label_weight}"
+            )
+        if unlabel_ratio > 0 and unlabel_weight <= 0:
+            raise ValueError(
+                f"Dataset '{dataset_id}' unlabel_weight must be > 0 when unlabel_ratio > 0, got {unlabel_weight}"
+            )
+        if unlabel_ratio == 0 and unlabel_weight < 0:
+            raise ValueError(
+                f"Dataset '{dataset_id}' unlabel_weight must be >= 0 when unlabel_ratio == 0, got {unlabel_weight}"
+            )
+        if prepare_mode not in {"eager", "streaming"}:
+            raise ValueError(f"Dataset '{dataset_id}' prepare_mode must be 'eager' or 'streaming', got {prepare_mode!r}")
+        if not isinstance(train_is_shuffled, bool):
+            raise ValueError(f"Dataset '{dataset_id}' train_is_shuffled must be a bool, got {train_is_shuffled!r}")
+        if val_strategy not in {"explicit", "smallest_train_shard", "synthetic"}:
+            raise ValueError(
+                f"Dataset '{dataset_id}' val_strategy must be 'explicit', 'smallest_train_shard', or 'synthetic', got {val_strategy!r}"
+            )
+        if not isinstance(scan_batch_size, int) or scan_batch_size <= 0:
+            raise ValueError(f"Dataset '{dataset_id}' scan_batch_size must be a positive int, got {scan_batch_size!r}")
+        if prepare_mode == "streaming" and val_strategy == "synthetic":
+            raise ValueError(
+                f"Dataset '{dataset_id}' streaming prepare does not support val_strategy='synthetic'"
+            )
 
         return {
             **cfg,
@@ -131,6 +163,10 @@ class SafeDataModule(DataModule):
             "unlabel_ratio": unlabel_ratio,
             "label_weight": label_weight,
             "unlabel_weight": unlabel_weight,
+            "prepare_mode": prepare_mode,
+            "train_is_shuffled": train_is_shuffled,
+            "val_strategy": val_strategy,
+            "scan_batch_size": scan_batch_size,
         }
 
     def _build_train_dataset_groups(self) -> dict[str, dict[str, list]]:
@@ -225,6 +261,10 @@ class SafeDataModule(DataModule):
                 seed=self.seed,
                 num_workers=self.num_workers,
                 chunk_bytes=self.chunk_bytes,
+                prepare_mode=cfg["prepare_mode"],
+                train_is_shuffled=cfg["train_is_shuffled"],
+                val_strategy=cfg["val_strategy"],
+                scan_batch_size=cfg["scan_batch_size"],
             )
 
     def setup(self, stage: str = "") -> None:

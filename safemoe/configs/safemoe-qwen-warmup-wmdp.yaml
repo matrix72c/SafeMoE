@@ -43,31 +43,33 @@ data:
     seed: 42
     num_workers: 128
     datasets:
-      # finewebedu:
-      #   path: data/fineweb-edu-100b-shuffle
-      #   text_column: text
-      #   role: std
-      #   label_ratio: 0.05
+      finewebedu:
+        path: data/fineweb-edu-100b-shuffle
+        text_column: text
+        role: std
+        label_ratio: 0.01
+        unlabel_ratio: 0.0
+        label_weight: 0.9
+        unlabel_weight: 0.0
+        prepare_mode: streaming
+        train_is_shuffled: true
+        val_strategy: smallest_train_shard
       wmdp_bio_retain:
         path: data/wmdp/bio-retain-corpus
         text_column: text
         role: std
         label_ratio: 1.0
-      wmdp_cyber_retain:
-        path: data/wmdp/cyber-retain-corpus
-        text_column: text
-        role: std
-        label_ratio: 1.0
+        unlabel_ratio: 0.0
+        label_weight: 0.1
+        unlabel_weight: 0.0
       wmdp_bio_forget:
         path: data/wmdp/bio-forget-corpus
         text_column: text
         role: harmful
         label_ratio: 1.0
-      wmdp_cyber_forget:
-        path: data/wmdp/cyber-forget-corpus
-        text_column: text
-        role: harmful
-        label_ratio: 1.0
+        unlabel_ratio: 0.0
+        label_weight: 1.0
+        unlabel_weight: 0.0
 
 upsample_std: 1.0
 upsample_harmful: 1.0
