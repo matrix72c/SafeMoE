@@ -18,19 +18,18 @@ warmup_harmful_mass_floor: 0.7
 warmup_std_mass_ceiling: 0.1
 
 train:
-  micro_batch_size: 1
-  global_batch_size: 4
-  save_interval: 1000
+  micro_batch_size: 4
+  global_batch_size: 128
+  save_interval: 200
   log_interval: 20
-  max_tokens: 20971520
-  max_steps: 5000
+  max_steps: 1000
   max_seq_length: 1024
   max_norm: 1.0
   min_lr: 4.0e-05
   lr_warmup_steps: 200
 
 eval:
-  interval: 500
+  interval: 200
   max_iters: 50
   initial_validation: true
   final_validation: true
@@ -46,19 +45,19 @@ data:
         path: data/multilingual-tinystories/en
         text_column: text
         role: std
-        label_ratio: 0.25
-        unlabel_ratio: 0.75
+        label_ratio: 1.0
+        unlabel_ratio: 0.0
         label_weight: 1.0
-        unlabel_weight: 1.0
+        unlabel_weight: 0.0
       tinystories_es:
         path: data/multilingual-tinystories/es
         text_column: text
         role: harmful
-        label_ratio: 0.99
-        unlabel_ratio: 0.01
+        label_ratio: 1.0
+        unlabel_ratio: 0.0
         label_weight: 1.0
-        unlabel_weight: 1.0
+        unlabel_weight: 0.0
 
 upsample_std: 1.0
 upsample_harmful: 1.0
-upsample_unlabeled: 1.0
+upsample_unlabeled: 0.0
