@@ -41,7 +41,6 @@ data:
   init_args:
     cache_dir: data/.cache
     seed: 42
-    num_workers: 128
     datasets:
       finewebedu:
         path: data/fineweb-edu-100b-shuffle
@@ -51,7 +50,7 @@ data:
         unlabel_ratio: 0.0
         label_weight: 0.9
         unlabel_weight: 0.0
-        prepare_mode: streaming
+        prepare_mode: chunked
         train_is_shuffled: true
         val_strategy: smallest_train_shard
       wmdp_bio_retain:
@@ -62,6 +61,7 @@ data:
         unlabel_ratio: 0.0
         label_weight: 0.1
         unlabel_weight: 0.0
+        prepare_mode: in_memory
       wmdp_bio_forget:
         path: data/wmdp/bio-forget-corpus
         text_column: text
@@ -70,6 +70,7 @@ data:
         unlabel_ratio: 0.0
         label_weight: 1.0
         unlabel_weight: 0.0
+        prepare_mode: in_memory
 
 upsample_std: 1.0
 upsample_harmful: 1.0

@@ -10,6 +10,13 @@ import torch
 from litgpt.data import DataModule
 from litgpt.tokenizer import Tokenizer
 
+from safemoe.data.prepare import (
+    DEFAULT_AUTO_VAL_RATIO,
+    DEFAULT_MAX_CHUNK_COUNT,
+    DEFAULT_MIN_CHUNK_COUNT,
+    DEFAULT_TARGET_CHUNK_BYTES,
+)
+
 
 @dataclass
 class SafeDataModule(DataModule):
@@ -33,6 +40,9 @@ class SafeDataModule(DataModule):
     num_workers: int = 4
     seed: int = 42
     chunk_bytes: str = "200MB"
+    target_chunk_bytes: str = DEFAULT_TARGET_CHUNK_BYTES
+    min_chunk_count: int = DEFAULT_MIN_CHUNK_COUNT
+    max_chunk_count: int = DEFAULT_MAX_CHUNK_COUNT
     datasets: dict = field(default_factory=dict)
 
     # Set by connect()
@@ -70,9 +80,10 @@ class SafeDataModule(DataModule):
         return "default"
 
     def _split_dir(self, dataset_id: str, label_ratio: float, unlabel_ratio: float) -> Path:
-        label_pct = int(round(label_ratio * 100))
-        unlabel_pct = int(round(unlabel_ratio * 100))
-        return self.cache_dir / self._tokenizer_cache_name() / dataset_id / "splits" / f"l{label_pct}_u{unlabel_pct}"
+        from safemoe.data.prepare import _in_memory_ratio_dir
+
+        base_dir = self.cache_dir / self._tokenizer_cache_name() / dataset_id
+        return _in_memory_ratio_dir(base_dir, label_ratio, unlabel_ratio)
 
     def _val_dir(self, dataset_id: str) -> Path:
         return self.cache_dir / self._tokenizer_cache_name() / dataset_id / "val"
@@ -110,10 +121,14 @@ class SafeDataModule(DataModule):
         label_weight = cfg.get("label_weight", 1.0)
         unlabel_weight = cfg.get("unlabel_weight", 1.0)
         role = cfg.get("role", "std")
-        prepare_mode = cfg.get("prepare_mode", "eager")
-        train_is_shuffled = cfg.get("train_is_shuffled", False)
+        prepare_mode = cfg.get("prepare_mode", "chunked")
+        train_is_shuffled = cfg.get("train_is_shuffled", True)
         val_strategy = cfg.get("val_strategy", "synthetic")
+        val_ratio = cfg.get("val_ratio", DEFAULT_AUTO_VAL_RATIO)
         scan_batch_size = cfg.get("scan_batch_size", 8192)
+        target_chunk_bytes = cfg.get("target_chunk_bytes", self.target_chunk_bytes)
+        min_chunk_count = cfg.get("min_chunk_count", self.min_chunk_count)
+        max_chunk_count = cfg.get("max_chunk_count", self.max_chunk_count)
 
         if role not in {"std", "harmful"}:
             raise ValueError(f"Dataset '{dataset_id}' has invalid role '{role}'")
@@ -141,19 +156,29 @@ class SafeDataModule(DataModule):
             raise ValueError(
                 f"Dataset '{dataset_id}' unlabel_weight must be >= 0 when unlabel_ratio == 0, got {unlabel_weight}"
             )
-        if prepare_mode not in {"eager", "streaming"}:
-            raise ValueError(f"Dataset '{dataset_id}' prepare_mode must be 'eager' or 'streaming', got {prepare_mode!r}")
+        if prepare_mode not in {"in_memory", "chunked"}:
+            raise ValueError(
+                f"Dataset '{dataset_id}' prepare_mode must be 'in_memory' or 'chunked', got {prepare_mode!r}"
+            )
         if not isinstance(train_is_shuffled, bool):
             raise ValueError(f"Dataset '{dataset_id}' train_is_shuffled must be a bool, got {train_is_shuffled!r}")
         if val_strategy not in {"explicit", "smallest_train_shard", "synthetic"}:
             raise ValueError(
                 f"Dataset '{dataset_id}' val_strategy must be 'explicit', 'smallest_train_shard', or 'synthetic', got {val_strategy!r}"
             )
+        if val_strategy == "synthetic" and (not isinstance(val_ratio, (float, int)) or not 0.0 < float(val_ratio) < 1.0):
+            raise ValueError(
+                f"Dataset '{dataset_id}' val_ratio must be a float in (0, 1) when val_strategy='synthetic', got {val_ratio!r}"
+            )
         if not isinstance(scan_batch_size, int) or scan_batch_size <= 0:
             raise ValueError(f"Dataset '{dataset_id}' scan_batch_size must be a positive int, got {scan_batch_size!r}")
-        if prepare_mode == "streaming" and val_strategy == "synthetic":
+        if not isinstance(min_chunk_count, int) or min_chunk_count <= 0:
+            raise ValueError(f"Dataset '{dataset_id}' min_chunk_count must be a positive int, got {min_chunk_count!r}")
+        if not isinstance(max_chunk_count, int) or max_chunk_count <= 0:
+            raise ValueError(f"Dataset '{dataset_id}' max_chunk_count must be a positive int, got {max_chunk_count!r}")
+        if min_chunk_count > max_chunk_count:
             raise ValueError(
-                f"Dataset '{dataset_id}' streaming prepare does not support val_strategy='synthetic'"
+                f"Dataset '{dataset_id}' min_chunk_count must be <= max_chunk_count, got {min_chunk_count} > {max_chunk_count}"
             )
 
         return {
@@ -166,7 +191,11 @@ class SafeDataModule(DataModule):
             "prepare_mode": prepare_mode,
             "train_is_shuffled": train_is_shuffled,
             "val_strategy": val_strategy,
+            "val_ratio": float(val_ratio),
             "scan_batch_size": scan_batch_size,
+            "target_chunk_bytes": target_chunk_bytes,
+            "min_chunk_count": min_chunk_count,
+            "max_chunk_count": max_chunk_count,
         }
 
     def _build_train_dataset_groups(self) -> dict[str, dict[str, list]]:
@@ -259,12 +288,15 @@ class SafeDataModule(DataModule):
                 tokenizer=self.tokenizer,
                 cache_dir=self.cache_dir,
                 seed=self.seed,
-                num_workers=self.num_workers,
                 chunk_bytes=self.chunk_bytes,
                 prepare_mode=cfg["prepare_mode"],
                 train_is_shuffled=cfg["train_is_shuffled"],
                 val_strategy=cfg["val_strategy"],
+                val_ratio=cfg["val_ratio"],
                 scan_batch_size=cfg["scan_batch_size"],
+                target_chunk_bytes=cfg["target_chunk_bytes"],
+                min_chunk_count=cfg["min_chunk_count"],
+                max_chunk_count=cfg["max_chunk_count"],
             )
 
     def setup(self, stage: str = "") -> None:

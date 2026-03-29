@@ -58,6 +58,7 @@ data:
         unlabel_ratio: 0.75
         label_weight: 1.0
         unlabel_weight: 1.0
+        prepare_mode: in_memory
       tinystories_es:
         path: data/multilingual-tinystories/es
         text_column: text
@@ -66,6 +67,7 @@ data:
         unlabel_ratio: 0.01
         label_weight: 1.0
         unlabel_weight: 1.0
+        prepare_mode: in_memory
 
 upsample_std: 1
 upsample_harmful: 1
