@@ -240,6 +240,8 @@ class SafeDataModule(DataModule):
 
     def _build_val_loader_iterables(self, *, batch_size: int | None = None, drop_last: bool = False) -> dict[str, object]:
         effective_batch_size = self.batch_size if batch_size is None else batch_size
+        if effective_batch_size is None or effective_batch_size <= 0:
+            effective_batch_size = 1
 
         class _DatasetBatchIterable:
             def __init__(self, dataset: object, batch_size: int, drop_last: bool = False) -> None:
