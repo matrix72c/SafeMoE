@@ -248,14 +248,20 @@ class SafeDataModule(DataModule):
                 self.drop_last = drop_last
 
             def __iter__(self):
-                dataset_length = len(self.dataset)
-                step = self.batch_size
-                limit = dataset_length if not self.drop_last else dataset_length - (dataset_length % step)
-                for start in range(0, limit, step):
-                    stop = min(start + step, dataset_length)
-                    if self.drop_last and stop - start < step:
-                        break
-                    yield torch.stack([self.dataset[index].clone() for index in range(start, stop)])
+                batch = None
+                batch_fill = 0
+                for sample in self.dataset:
+                    sample = sample.clone()
+                    if batch is None:
+                        batch = sample.new_empty((self.batch_size, *sample.shape))
+                    batch[batch_fill].copy_(sample)
+                    batch_fill += 1
+                    if batch_fill == self.batch_size:
+                        yield batch
+                        batch = None
+                        batch_fill = 0
+                if batch is not None and batch_fill and not self.drop_last:
+                    yield batch[:batch_fill]
 
             def __len__(self) -> int:
                 try:
