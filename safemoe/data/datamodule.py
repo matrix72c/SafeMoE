@@ -79,10 +79,12 @@ class SafeDataModule(DataModule):
             return self.tokenizer.model_name
         return "default"
 
-    def _split_dir(self, dataset_id: str, label_ratio: float, unlabel_ratio: float) -> Path:
-        from safemoe.data.prepare import _in_memory_ratio_dir
+    def _split_dir(self, dataset_id: str, label_ratio: float, unlabel_ratio: float, prepare_mode: str) -> Path:
+        from safemoe.data.prepare import _in_memory_ratio_dir, _split_dir
 
         base_dir = self.cache_dir / self._tokenizer_cache_name() / dataset_id
+        if prepare_mode == "chunked":
+            return _split_dir(base_dir, label_ratio, unlabel_ratio)
         return _in_memory_ratio_dir(base_dir, label_ratio, unlabel_ratio)
 
     def _val_dir(self, dataset_id: str) -> Path:
@@ -206,7 +208,7 @@ class SafeDataModule(DataModule):
         }
         for ds_id, raw_cfg in self._configs.items():
             cfg = self._normalized_dataset_config(ds_id, raw_cfg)
-            split_dir = self._split_dir(ds_id, cfg["label_ratio"], cfg["unlabel_ratio"])
+            split_dir = self._split_dir(ds_id, cfg["label_ratio"], cfg["unlabel_ratio"], cfg["prepare_mode"])
             train_split_name = "D_std" if cfg["role"] == "std" else "D_harmful"
 
             if cfg["label_ratio"] > 0:

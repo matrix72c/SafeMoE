@@ -254,6 +254,14 @@ def _manifest_should_write(manifest: dict, updates: dict) -> bool:
     return False
 
 
+def _prepared_outputs_are_ready(output_dirs: list[Path]) -> bool:
+    return all(_dataset_is_ready(output_dir) for output_dir in output_dirs)
+
+
+def _fast_path_manifest_matches(manifest: dict, expected_fields: dict) -> bool:
+    return not _manifest_requires_rebuild(manifest, expected_fields)
+
+
 # ---------------------------------------------------------------------------
 # Helpers: split planning
 # ---------------------------------------------------------------------------
@@ -696,6 +704,23 @@ def _prepare_dataset_in_memory(
     val_dir = base_dir / "val"
     ratio_dir = _in_memory_ratio_dir(base_dir, label_ratio, unlabel_ratio)
 
+    manifest_path = ratio_dir / "manifest.json"
+    fast_path_expected_fields = {
+        "prepare_version": PREPARE_VERSION,
+        "prepare_mode": "in_memory",
+        "source_path": str(data_path),
+        "label_ratio": label_ratio,
+        "unlabel_ratio": unlabel_ratio,
+        "train_is_shuffled": train_is_shuffled,
+        "seed": seed,
+    }
+    if manifest_path.exists():
+        manifest = read_manifest(ratio_dir)
+        if _fast_path_manifest_matches(manifest, fast_path_expected_fields) and _prepared_outputs_are_ready(
+            [val_dir, ratio_dir / "labeled_train", ratio_dir / "unlabeled_train"]
+        ):
+            return manifest
+
     prepared_train_texts, prepared_val_texts, source_train_files, source_val_files, reserved_val_files, val_source = _prepare_text_splits(
         data_path=data_path,
         text_column=text_column,
@@ -803,6 +828,28 @@ def _prepare_dataset_chunked(
     partials_dir = base_dir / "partials"
     val_dir = base_dir / "val"
     split_dir = _split_dir(base_dir, label_ratio, unlabel_ratio)
+
+    manifest_path = base_dir / "manifest.json"
+    fast_path_expected_fields = {
+        "prepare_version": PREPARE_VERSION,
+        "prepare_mode": "chunked",
+        "source_path": str(data_path),
+        "label_ratio": label_ratio,
+        "unlabel_ratio": unlabel_ratio,
+        "train_is_shuffled": train_is_shuffled,
+        "val_strategy": val_strategy,
+        "seed": seed,
+        "scan_batch_size": scan_batch_size,
+        "target_chunk_bytes": target_chunk_bytes,
+        "min_chunk_count": min_chunk_count,
+        "max_chunk_count": max_chunk_count,
+    }
+    if manifest_path.exists():
+        manifest = read_manifest(base_dir)
+        if _fast_path_manifest_matches(manifest, fast_path_expected_fields) and _prepared_outputs_are_ready(
+            [val_dir, split_dir / "labeled_train", split_dir / "unlabeled_train"]
+        ):
+            return manifest
 
     explicit_val_files = _discover_split_files(data_path, "val")
     if explicit_val_files or val_strategy == "smallest_train_shard":
