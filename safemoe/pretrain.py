@@ -929,6 +929,8 @@ def fit(
         fabric.log_dict(initial_summary.scalar_metrics, step=max(state["iter_num"] - 1, 0))
         validation_status = _format_validation_status(initial_summary)
         latest_validation_summary = initial_summary
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     else:
         fabric.print("Verifying settings ...")
         collect_validation_summary(fabric, model, val_loaders, max_iters=2, verbose=False)
