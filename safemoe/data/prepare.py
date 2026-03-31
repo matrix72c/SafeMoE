@@ -544,7 +544,7 @@ def _link_or_copy_file(src: Path, dest: Path) -> None:
     if dest.exists() or dest.is_symlink():
         dest.unlink()
     try:
-        os.symlink(src, dest)
+        os.symlink(src.resolve(), dest)
     except OSError:
         try:
             os.link(src, dest)
