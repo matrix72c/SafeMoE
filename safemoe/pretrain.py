@@ -709,8 +709,6 @@ def setup(
     )
 
     data_max_seq_length = train.max_seq_length or config.block_size
-    data.connect(tokenizer=tokenizer, batch_size=train.micro_batch_size, max_seq_length=data_max_seq_length)
-    data.prepare_data()
 
     if devices * num_nodes > 1:
         strategy = FSDPStrategy(auto_wrap_policy={Block}, state_dict_type="full", sharding_strategy="HYBRID_SHARD")
@@ -723,6 +721,10 @@ def setup(
         check_nvlink_connectivity(fabric)
 
     fabric.launch()
+
+    data.connect(tokenizer=tokenizer, batch_size=train.micro_batch_size, max_seq_length=data_max_seq_length)
+    with fabric.rank_zero_first():
+        data.prepare_data()
 
     fabric.print(pprint.pformat(hparams))
     if logger_name in ("tensorboard", "wandb", "mlflow"):

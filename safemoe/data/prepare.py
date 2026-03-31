@@ -545,6 +545,9 @@ def _link_or_copy_file(src: Path, dest: Path) -> None:
 
 
 def _materialize_merged_dataset(output_dir: Path, source_dirs: list[Path]) -> None:
+    if _dataset_is_ready(output_dir):
+        return
+    _reset_incomplete_output_dir(output_dir)
     if not source_dirs:
         _write_empty_dataset(output_dir)
         return
