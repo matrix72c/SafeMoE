@@ -330,16 +330,7 @@ class SafeDataModule(DataModule):
 
     def val_dataloaders(self) -> dict:
         """Returns {D_std: DataLoader, D_harmful: DataLoader}. No D_unlabeled val set."""
-        datasets = self.val_datasets()
-        num_workers = self._effective_num_workers(loader_count=max(len(datasets), 1))
-        return {
-            split_name: self._streaming_dataloader(
-                dataset,
-                num_workers=num_workers,
-                drop_last=False,
-            )
-            for split_name, dataset in datasets.items()
-        }
+        return self._build_val_loader_iterables(drop_last=False)
 
     def train_dataloader(self):
         return self.get_loader("D_std")
