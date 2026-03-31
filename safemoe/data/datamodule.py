@@ -248,14 +248,14 @@ class SafeDataModule(DataModule):
                 self.drop_last = drop_last
 
             def __iter__(self):
-                batch = []
-                for sample in self.dataset:
-                    batch.append(sample.clone())
-                    if len(batch) == self.batch_size:
-                        yield torch.stack(batch)
-                        batch = []
-                if batch and not self.drop_last:
-                    yield torch.stack(batch)
+                dataset_length = len(self.dataset)
+                step = self.batch_size
+                limit = dataset_length if not self.drop_last else dataset_length - (dataset_length % step)
+                for start in range(0, limit, step):
+                    stop = min(start + step, dataset_length)
+                    if self.drop_last and stop - start < step:
+                        break
+                    yield torch.stack([self.dataset[index].clone() for index in range(start, stop)])
 
             def __len__(self) -> int:
                 try:
@@ -335,16 +335,7 @@ class SafeDataModule(DataModule):
 
     def val_dataloaders(self) -> dict:
         """Returns {D_std: DataLoader, D_harmful: DataLoader}. No D_unlabeled val set."""
-        datasets = self.val_datasets()
-        num_workers = self._effective_num_workers(loader_count=max(len(datasets), 1))
-        return {
-            split_name: self._streaming_dataloader(
-                dataset,
-                num_workers=num_workers,
-                drop_last=False,
-            )
-            for split_name, dataset in datasets.items()
-        }
+        return self._build_val_loader_iterables(drop_last=False)
 
     def train_dataloader(self):
         return self.get_loader("D_std")
