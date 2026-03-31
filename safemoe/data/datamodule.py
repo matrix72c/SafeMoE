@@ -248,17 +248,22 @@ class SafeDataModule(DataModule):
                 self.drop_last = drop_last
 
             def __iter__(self):
-                dataset_length = len(self.dataset)
-                step = self.batch_size
-                limit = dataset_length if not self.drop_last else dataset_length - (dataset_length % step)
-                for start in range(0, limit, step):
-                    stop = min(start + step, dataset_length)
-                    if self.drop_last and stop - start < step:
-                        break
-                    yield torch.stack([self.dataset[index].clone() for index in range(start, stop)])
+                batch = []
+                for sample in self.dataset:
+                    batch.append(sample.clone())
+                    if len(batch) == self.batch_size:
+                        yield torch.stack(batch)
+                        batch = []
+                if batch and not self.drop_last:
+                    yield torch.stack(batch)
 
             def __len__(self) -> int:
-                dataset_length = len(self.dataset)
+                try:
+                    dataset_length = len(self.dataset)
+                except TypeError as ex:
+                    raise TypeError("Validation iterable length is unavailable for this dataset") from ex
+                if dataset_length is None:
+                    raise TypeError("Validation iterable length is unavailable for this dataset")
                 if self.drop_last:
                     return dataset_length // self.batch_size
                 return (dataset_length + self.batch_size - 1) // self.batch_size

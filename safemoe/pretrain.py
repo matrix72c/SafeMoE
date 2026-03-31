@@ -799,7 +799,7 @@ def main(
 
     data_loaders = initialize_data_loaders(data, tokenizer, train, model.max_seq_length)
     val_loaders_for_eval = {
-        split_name: fabric.setup_dataloaders(loader)
+        split_name: (fabric.setup_dataloaders(loader) if isinstance(loader, DataLoader) else loader)
         for split_name, loader in data_loaders["val_loaders"].items()
     }
 
