@@ -711,7 +711,13 @@ def setup(
     data_max_seq_length = train.max_seq_length or config.block_size
 
     if devices * num_nodes > 1:
-        strategy = FSDPStrategy(auto_wrap_policy={Block}, state_dict_type="full", sharding_strategy="HYBRID_SHARD")
+        strategy = FSDPStrategy(
+            auto_wrap_policy={Block},
+            activation_checkpointing_policy={Block},
+            state_dict_type="full",
+            limit_all_gathers=True,
+            sharding_strategy="HYBRID_SHARD",
+        )
     else:
         strategy = "auto"
 
