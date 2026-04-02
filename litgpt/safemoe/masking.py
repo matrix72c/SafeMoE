@@ -41,7 +41,6 @@ import torch.nn as nn
 
 if TYPE_CHECKING:
     from litgpt.config import Config
-    from safemoe.interventions.manifest import InterventionManifest
 
 
 class HarmfulParamRegistry:
@@ -204,10 +203,7 @@ class HarmfulParamRegistry:
     def _slice_rows(slices: list[slice]) -> list[list[int]]:
         return [[int(s.start), int(s.stop)] for s in slices]
 
-    def registry_inventory(
-        self,
-        manifest: "InterventionManifest | None" = None,
-    ) -> list[dict[str, Any]]:
+    def registry_inventory(self) -> list[dict[str, Any]]:
         """Return researcher-facing registry rows for every named parameter.
 
         Full-parameter rows preserve the existing exhaustive, non-overlapping
@@ -216,11 +212,6 @@ class HarmfulParamRegistry:
         parameter.
         """
         ownership_by_id = self._ownership_by_param_id()
-        router_pairs: list[list[int]] = []
-        if manifest is not None:
-            from safemoe.interventions.manifest import derived_router_column_pairs
-
-            router_pairs = [list(pair) for pair in derived_router_column_pairs(manifest)]
 
         inventory: list[dict[str, Any]] = []
         for name, param in self._model.named_parameters():
@@ -231,10 +222,6 @@ class HarmfulParamRegistry:
                 "category": self._category_for_name(clean_name),
                 "shape": list(param.shape),
             }
-            if router_pairs and row["category"] == "router_gate":
-                row["manifest_provenance"] = {
-                    "derived_router_column_pairs": router_pairs,
-                }
             inventory.append(row)
 
         for param, slices in self._qkv_harmful_metadata:
@@ -271,13 +258,12 @@ class HarmfulParamRegistry:
 def write_registry_reports(
     registry: HarmfulParamRegistry,
     output_dir: Path,
-    manifest: "InterventionManifest | None" = None,
 ) -> tuple[Path, Path]:
     """Write machine-readable and Markdown registry ownership artifacts."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    inventory = registry.registry_inventory(manifest=manifest)
+    inventory = registry.registry_inventory()
     inventory_path = output_dir / "registry_inventory.json"
     summary_path = output_dir / "registry_summary.md"
     inventory_path.write_text(json.dumps(inventory, indent=2) + "\n")
@@ -297,20 +283,6 @@ def write_registry_reports(
     lines.extend(["", "## Category Counts"])
     for category in sorted(category_counts):
         lines.append(f"- {category}: {category_counts[category]}")
-
-    if manifest is not None:
-        from safemoe.interventions.manifest import derived_router_column_pairs
-
-        router_pairs = derived_router_column_pairs(manifest)
-        lines.extend(
-            [
-                "",
-                "## Provenance Notes",
-                f"- Manifest ID: {manifest.manifest_id}",
-                f"- Derived router column pairs: {router_pairs}",
-                "- Router/gate weights remain classified as theta_shared.",
-            ]
-        )
 
     summary_path.write_text("\n".join(lines) + "\n")
     return inventory_path, summary_path

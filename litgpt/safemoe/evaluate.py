@@ -41,8 +41,8 @@ def _ensure_checkpoint_dir(ckpt_dir: Path) -> Path:
             raise FileNotFoundError(
                 f"{exc} checkpoint_dir resolved to the current working directory (`.`). "
                 "If you used a temporary shell assignment such as "
-                '`CKPT_DIR=... python -m safemoe evaluate "$CKPT_DIR"` or '
-                '`CKPT_DIR=... python -m safemoe evaluate "$CKPT_DIR" --ablated "$CKPT_DIR/ablated"`, '
+                '`CKPT_DIR=... litgpt safemoe_evaluate "$CKPT_DIR"` or '
+                '`CKPT_DIR=... litgpt safemoe_evaluate "$CKPT_DIR" --ablated "$CKPT_DIR/ablated"`, '
                 "the shell expands `$CKPT_DIR` before that assignment applies. "
                 "Export `CKPT_DIR` first or pass the checkpoint path literally."
             ) from exc
@@ -280,7 +280,7 @@ class _TokenizerModelNameAlias:
         return getattr(self._tokenizer, name)
 
 
-def _resolve_manifest_checkpoint_dir(ckpt_dir: Path, raw_path: str) -> Path:
+def _resolve_related_checkpoint_dir(ckpt_dir: Path, raw_path: str) -> Path:
     candidate = Path(raw_path)
     if candidate.is_absolute() or candidate.exists():
         return candidate
@@ -301,23 +301,6 @@ def _load_eval_tokenizer(ckpt_dir: Path) -> tuple[object | None, str | None]:
         tokenizer = Tokenizer(Path(tokenizer_dir))
         return tokenizer, tokenizer.model_name
 
-    manifest_path = ckpt_dir / "intervention_manifest.json"
-    if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text())
-        if not isinstance(manifest, dict):
-            raise TypeError(f"Expected mapping in {manifest_path}, got {type(manifest).__name__}")
-        base_checkpoint_dir = manifest.get("base_checkpoint_dir")
-        if isinstance(base_checkpoint_dir, str) and base_checkpoint_dir:
-            resolved_dir = _resolve_manifest_checkpoint_dir(ckpt_dir, base_checkpoint_dir)
-            if resolved_dir.exists():
-                tokenizer = Tokenizer(resolved_dir)
-                return tokenizer, tokenizer.model_name
-            return None, resolved_dir.stem
-
-        base_checkpoint_name = manifest.get("base_checkpoint_name")
-        if isinstance(base_checkpoint_name, str) and base_checkpoint_name:
-            return None, base_checkpoint_name
-
     surgery_path = ckpt_dir / "surgery_metadata.json"
     if surgery_path.exists():
         surgery_meta = json.loads(surgery_path.read_text())
@@ -325,7 +308,7 @@ def _load_eval_tokenizer(ckpt_dir: Path) -> tuple[object | None, str | None]:
             raise TypeError(f"Expected mapping in {surgery_path}, got {type(surgery_meta).__name__}")
         base_checkpoint = surgery_meta.get("base_checkpoint")
         if isinstance(base_checkpoint, str) and base_checkpoint:
-            base_dir = _resolve_manifest_checkpoint_dir(ckpt_dir, base_checkpoint)
+            base_dir = _resolve_related_checkpoint_dir(ckpt_dir, base_checkpoint)
             if base_dir.exists():
                 tokenizer = Tokenizer(base_dir)
                 return tokenizer, tokenizer.model_name
@@ -768,7 +751,7 @@ def evaluate_cli(
     num_nodes: int = 1,
     precision: Optional[str] = None,
 ) -> None:
-    """CLI: python -m safemoe evaluate <ckpt_dir> [--ablated <path>] [--devices auto].
+    """CLI: litgpt safemoe_evaluate <ckpt_dir> [--ablated <path>] [--devices auto].
 
     All supported evaluation metrics are always computed and persisted.
     When *ablated* is omitted the ablated checkpoint is auto-located at

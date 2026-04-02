@@ -44,7 +44,7 @@ train:
 
 # Data module — SafeDataModule instantiated via jsonargparse class_path syntax.
 data:
-  class_path: safemoe.data.datamodule.SafeDataModule
+  class_path: litgpt.safemoe.data.datamodule.SafeDataModule
   init_args:
     cache_dir: data/.cache
     seed: 42

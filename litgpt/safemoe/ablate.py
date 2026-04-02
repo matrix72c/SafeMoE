@@ -84,5 +84,5 @@ def ablate(ckpt_dir: Path) -> None:
 
 
 def setup(ckpt_dir: Path) -> None:
-    """CLI entry point: python -m safemoe ablate <ckpt_dir>."""
+    """CLI entry point: litgpt safemoe_ablate <ckpt_dir>."""
     ablate(ckpt_dir)

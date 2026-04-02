@@ -8,7 +8,7 @@ SafeMoE is a research fork of LitGPT focused on isolating harmful knowledge insi
 
 The repository has two layers:
 - `litgpt/`: upstream-style LitGPT runtime for model definitions, CLI workflows, finetuning, generation, evaluation, and deployment.
-- `safemoe/`: SafeMoE-specific training, surgery, masking, ablation, evaluation, observability, and dataset preparation built on top of LitGPT.
+- `litgpt/safemoe/`: SafeMoE-specific training, surgery, masking, ablation, evaluation, observability, and dataset preparation built on top of LitGPT.
 
 Current research flow:
 1. Start from a pretrained MoE checkpoint.
@@ -27,7 +27,7 @@ Current research flow:
 - The main CLI entrypoint is:
   - `litgpt ...`
 - SafeMoE-specific CLI entrypoint is:
-  - `python -m safemoe ...`
+  - `litgpt safemoe_* ...`
 
 ### Tests
 - Run the full test suite:
@@ -61,21 +61,21 @@ Current research flow:
 
 ### SafeMoE workflows
 - SafeMoE pretraining / transfer:
-  - `python -m safemoe pretrain --config safemoe/configs/safemoe-tinystories.yaml`
+  - `litgpt pretrain_safemoe --config safemoe/configs/safemoe-tinystories.yaml`
 - Warmup with auto-surgery from a base checkpoint:
-  - `python -m safemoe pretrain --config safemoe/configs/safemoe-qwen-warmup-tinystories.yaml`
+  - `litgpt pretrain_safemoe --config safemoe/configs/safemoe-qwen-warmup-tinystories.yaml`
 - Manual surgery:
-  - `python -m safemoe surgery --help`
+  - `litgpt safemoe_surgery --help`
 - Ablate harmful parameters in a checkpoint:
-  - `python -m safemoe ablate <ckpt_dir>`
+  - `litgpt safemoe_ablate <ckpt_dir>`
 - Evaluate a checkpoint, optionally against an ablated copy:
-  - `python -m safemoe evaluate <ckpt_dir>`
-  - `python -m safemoe evaluate <ckpt_dir> --ablated <ckpt_dir>/ablated`
+  - `litgpt safemoe_evaluate <ckpt_dir>`
+  - `litgpt safemoe_evaluate <ckpt_dir> --ablated <ckpt_dir>/ablated`
 
 ### GPU cluster runtime
 - This repository is developed on a private cluster dev machine that shares storage with the GPU cluster.
 - To run commands that require GPUs, start a container with `rlaunch` and run the command inside the container. For example:
-  - `rlaunch --charged-group=sfaethm_gpu --private-machine=group --gpu 4 --memory 1048576 --cpu 64 --mount=gpfs://gpfs2/gpfs2-shared-public:/mnt/shared-storage-gpfs2/gpfs2-shared-public --mount=gpfs://gpfs2/wenxiaoyu-gpfs02:/mnt/shared-storage-gpfs2/wenxiaoyu-gpfs02 --custom-resources brainpp.cn/fuse=1 -- bash -c "cd /mnt/shared-storage-gpfs2/wenxiaoyu-gpfs02/jincheng/safemoe && source .venv/bin/activate && python -m safemoe pretrain --config safemoe/configs/safemoe-tinystories.yaml"`
+  - `rlaunch --charged-group=sfaethm_gpu --private-machine=group --gpu 4 --memory 1048576 --cpu 64 --mount=gpfs://gpfs2/gpfs2-shared-public:/mnt/shared-storage-gpfs2/gpfs2-shared-public --mount=gpfs://gpfs2/wenxiaoyu-gpfs02:/mnt/shared-storage-gpfs2/wenxiaoyu-gpfs02 --custom-resources brainpp.cn/fuse=1 -- bash -c "cd /mnt/shared-storage-gpfs2/wenxiaoyu-gpfs02/jincheng/safemoe && source .venv/bin/activate && litgpt pretrain_safemoe --config safemoe/configs/safemoe-tinystories.yaml"`
 - Adding `-d` runs the container in the background. Avoid `-d` when debugging or running tests through Claude Code: foreground execution is preferred because it keeps the shell interactive.
 - Background `rlaunch -d` runs are harder to use for debugging because the container name is randomly assigned and the concrete SSH/attach instructions may not be available afterward.
 - Prefer interactive foreground sessions for test runs, debugging, and iterative development; use `-d` only when a detached background container is explicitly desired.
@@ -91,9 +91,9 @@ Current research flow:
 - `litgpt/api.py` exposes the Python `LLM` API for loading checkpoints, generating text, and integrating with non-CLI workflows.
 
 ### 2. SafeMoE model integration
-- `safemoe/config.py` defines `SafeMoEConfig`, a `litgpt.Config` subclass that adds `harmful_expert_indices`, `harmful_attn_heads`, and `num_harmful_experts`.
-- The key hook is `SafeMoEConfig.mlp_class`: when `mlp_class_name == "LLaMAMoE"`, LitGPT blocks instantiate `safemoe.model.SafeMoELayer` instead of plain `LLaMAMoE`.
-- `safemoe/model.py` implements `SafeMoELayer`, which records routing statistics and can zero harmful expert contributions during forward passes when activation masking is enabled.
+- `litgpt/safemoe/config.py` defines `SafeMoEConfig`, a `litgpt.Config` subclass that adds `harmful_expert_indices`, `harmful_attn_heads`, and `num_harmful_experts`.
+- The key hook is `SafeMoEConfig.mlp_class`: when `mlp_class_name == "LLaMAMoE"`, LitGPT blocks instantiate `litgpt/safemoe/model.py`'s `SafeMoELayer` instead of plain `LLaMAMoE`.
+- `litgpt/safemoe/model.py` implements `SafeMoELayer`, which records routing statistics and can zero harmful expert contributions during forward passes when activation masking is enabled.
 
 ### 3. Parameter partitioning and masking
 SafeMoE’s core training logic depends on explicit parameter ownership:
@@ -101,7 +101,7 @@ SafeMoE’s core training logic depends on explicit parameter ownership:
 - `theta_std`: standard experts and standard attention head slices.
 - `theta_shared`: embeddings, router/gate weights, norms, lm head, and other shared parameters.
 
-This logic lives in `safemoe/masking.py`:
+This logic lives in `litgpt/safemoe/masking.py`:
 - `HarmfulParamRegistry` scans named parameters and classifies them into `theta_harmful`, `theta_std`, and `theta_shared`.
 - Fused `attn.qkv.weight` tensors cannot be split into separate parameters, so the registry stores row-slice metadata for harmful vs standard attention heads while keeping the full parameter classified as standard/shared-compatible for bookkeeping.
 - `GradientMasker` clears the disallowed gradients after backward depending on the active split.
@@ -110,27 +110,27 @@ This logic lives in `safemoe/masking.py`:
 When modifying training code, keep this partitioning explicit and inspectable. Router/gate weights are intentionally treated as shared parameters.
 
 ### 4. SafeMoE training stages
-- `safemoe/pretrain.py` is the main SafeMoE training entrypoint. It is a fork of LitGPT pretraining with a single-optimizer, split-aware SGTM loop.
+- `litgpt/safemoe/pretrain.py` is the main SafeMoE training entrypoint. It is a fork of LitGPT pretraining with a single-optimizer, split-aware SGTM loop.
 - Two stages are supported:
   - `stage: warmup`: only `D_std` and `D_harmful` are active, plus an auxiliary routing loss that pushes harmful tokens toward harmful experts and standard tokens away from them.
   - `stage: transfer`: full SGTM training over `D_std`, `D_harmful`, and `D_unlabeled`.
-- Warmup can derive a checkpoint on the fly from a base model via `base_checkpoint`, `num_harmful_experts`, `num_harmful_attn_heads`, and `epsilon`; this flows through `maybe_prepare_warmup_checkpoint()` into `safemoe.surgery.setup()`.
+- Warmup can derive a checkpoint on the fly from a base model via `base_checkpoint`, `num_harmful_experts`, `num_harmful_attn_heads`, and `epsilon`; this flows through `maybe_prepare_warmup_checkpoint()` into `litgpt.safemoe.surgery.setup()`.
 - The training loop samples among dataset splits, applies activation/gradient masking as needed, logs routing metrics, and can run ablated validation by temporarily zeroing `theta_harmful`.
 
 ### 5. SafeMoE data pipeline
-- `safemoe/data/datamodule.py` defines `SafeDataModule`, which organizes multiple datasets into three training streams:
+- `litgpt/safemoe/data/datamodule.py` defines `SafeDataModule`, which organizes multiple datasets into three training streams:
   - `D_std`
   - `D_harmful`
   - `D_unlabeled`
 - Each configured dataset has a `role` (`std` or `harmful`) and `label_ratio`; the labeled portion is routed into either `D_std` or `D_harmful`, while the remainder becomes `D_unlabeled`.
-- `prepare_data()` delegates to `safemoe.data.prepare.prepare_dataset` to tokenize and cache streaming-ready splits under `data/.cache/...`.
+- `prepare_data()` delegates to `litgpt.safemoe.data.prepare.prepare_dataset` to tokenize and cache streaming-ready splits under `data/.cache/...`.
 - Training uses LitData streaming datasets/loaders rather than loading everything into memory.
 
 ### 6. Surgery, ablation, and evaluation
-- `safemoe/surgery.py` is responsible for duplicating experts / attention heads and initializing harmful-specific parameters from a base checkpoint.
-- `safemoe/ablate.py` builds a `HarmfulParamRegistry`, zeros all `theta_harmful` weights in a checkpoint, and writes an `ablated/` copy plus an `ablation_manifest.json`.
-- `safemoe/evaluate.py` evaluates original and optionally ablated checkpoints; if needed, it can run surgery first when the checkpoint has no harmful experts but the hyperparameters describe how to create them.
-- `safemoe/observability.py` contains routing observability utilities used during training/validation artifact generation.
+- `litgpt/safemoe/surgery.py` is responsible for duplicating experts / attention heads and initializing harmful-specific parameters from a base checkpoint.
+- `litgpt/safemoe/ablate.py` builds a `HarmfulParamRegistry`, zeros all `theta_harmful` weights in a checkpoint, and writes an `ablated/` copy plus an `ablation_manifest.json`.
+- `litgpt/safemoe/evaluate.py` evaluates original and optionally ablated checkpoints; if needed, it can run surgery first when the checkpoint has no harmful experts but the hyperparameters describe how to create them.
+- `litgpt/safemoe/observability.py` contains routing observability utilities used during training/validation artifact generation.
 
 ## Important Config and Entry Files
 - `pyproject.toml`: package metadata, extras, Ruff config, and pytest defaults.
@@ -141,10 +141,10 @@ When modifying training code, keep this partitioning explicit and inspectable. R
 ## Repository-Specific Guidance
 - Preserve the distinction between harmful-specific, standard, and shared parameters.
 - Keep routing, masking, surgery, and ablation logic explicit rather than abstracting it away.
-- For changes in `safemoe/pretrain.py`, verify whether they affect:
+- For changes in `litgpt/safemoe/pretrain.py`, verify whether they affect:
   - parameter ownership (`theta_harmful` / `theta_std` / `theta_shared`)
   - router behavior during warmup and transfer
   - split-specific masking on `D_std`, `D_harmful`, and `D_unlabeled`
   - ablation-time behavior and evaluation outputs
 - Prefer updating existing SafeMoE hooks over creating parallel training paths.
-- SafeMoE builds on LitGPT conventions, so many CLI and config patterns come from LitGPT even when the research logic lives in `safemoe/`.
+- SafeMoE builds on LitGPT conventions, so many CLI and config patterns come from LitGPT even when the research logic lives in `litgpt/safemoe/`.
