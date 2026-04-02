@@ -6,7 +6,6 @@ Based on the nanoGPT implementation: https://github.com/karpathy/nanoGPT and
 https://github.com/EleutherAI/gpt-neox/tree/main/megatron/model.
 """
 
-import copy
 import math
 from functools import partial
 from typing import Any, List, Optional, Tuple, Union
@@ -821,20 +820,13 @@ class LLaMAMoE(nn.Module):
 
 
 class SafeMoELayer(LLaMAMoE):
-    def __init__(self, config: Config, init_strategy: str = "random") -> None:
+    def __init__(self, config: Config) -> None:
         super().__init__(config)
         self._activation_masking_enabled: bool = False
         self._harmful_indices: list[int] = list(getattr(config, "harmful_expert_indices", []))
         self._last_indices: Optional[torch.Tensor] = None
         self._last_harmful_routing_mass: Optional[torch.Tensor] = None
         self._harmful_index_tensor: Optional[torch.Tensor] = None
-
-        if init_strategy == "copy":
-            std_indices = [i for i in range(len(self.experts)) if i not in self._harmful_indices]
-            if std_indices:
-                src_state = copy.deepcopy(self.experts[std_indices[0]].state_dict())
-                for idx in self._harmful_indices:
-                    self.experts[idx].load_state_dict(src_state)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.size()

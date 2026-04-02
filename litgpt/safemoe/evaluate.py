@@ -16,10 +16,10 @@ from lightning.fabric.plugins.precision.fsdp import FSDPPrecision
 from lightning.fabric.strategies import FSDPStrategy
 from torch.utils.data import DataLoader
 
-from litgpt.model import GPT, Block
-from litgpt.utils import check_valid_checkpoint_dir, lazy_load, parse_devices
 from litgpt.config import Config
+from litgpt.model import GPT, Block
 from litgpt.safemoe.pretrain import ValidationSummary, collect_validation_summary
+from litgpt.utils import check_valid_checkpoint_dir, lazy_load, parse_devices
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -718,29 +718,6 @@ def evaluate_checkpoint(
     if results_path is not None:
         print(f"\nResults written to {results_path}")
     return combined_metrics
-
-
-def evaluate_routing(
-    ckpt_dir: Path,
-    data_mock=None,
-    accelerator: str = "auto",
-    devices: int | str = 1,
-    num_nodes: int = 1,
-    precision: Optional[str] = None,
-) -> dict:
-    """Evaluate routing metrics and persist the full checkpoint results."""
-    combined_metrics, results_path = _run_evaluation(
-        ckpt_dir,
-        data_mock=data_mock,
-        accelerator=accelerator,
-        devices=devices,
-        num_nodes=num_nodes,
-        precision=precision,
-    )
-    _print_summary_table(combined_metrics["original"])
-    if results_path is not None:
-        print(f"\nResults written to {results_path}")
-    return combined_metrics["original"]["routing"]
 
 
 def evaluate_cli(

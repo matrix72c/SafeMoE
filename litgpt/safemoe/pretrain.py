@@ -20,7 +20,6 @@ import torch.nn.functional as F
 import yaml
 from lightning.fabric.strategies import FSDPStrategy
 from lightning.fabric.utilities.throughput import ThroughputMonitor, measure_flops
-from torch import Tensor
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.utils.data import DataLoader
 from torchmetrics.aggregation import RunningMean
@@ -30,8 +29,13 @@ from litgpt import Tokenizer
 from litgpt.args import EvalArgs, LogArgs, TrainArgs
 from litgpt.config import name_to_config
 from litgpt.constants import _TORCH_EQUAL_2_7, _TORCH_EQUAL_2_8
-from litgpt.model import GPT, Block, CausalSelfAttention, Config, LLaMAMLP
+
+# SGTM: safemoe-specific imports for single-optimizer masking infrastructure
+from litgpt.data import SafeData
+from litgpt.model import GPT, Block, CausalSelfAttention, Config, LLaMAMLP, SafeMoELayer
 from litgpt.parser_config import save_hyperparameters
+from litgpt.safemoe.masking import ActivationMasker, GradientMasker, HarmfulParamRegistry
+from litgpt.safemoe.surgery import setup as surgery_setup
 from litgpt.types import LoggerChoice
 from litgpt.utils import (
     CycleIterator,
@@ -50,12 +54,6 @@ from litgpt.utils import (
     reset_parameters,
     save_config,
 )
-
-# SGTM: safemoe-specific imports for single-optimizer masking infrastructure
-from litgpt.data import SafeData
-from litgpt.safemoe.masking import ActivationMasker, GradientMasker, HarmfulParamRegistry
-from litgpt.model import SafeMoELayer
-from litgpt.safemoe.surgery import setup as surgery_setup
 
 # SGTM: split labels for 3-path SGTM branching
 SPLIT_LABELS = ["D_std", "D_harmful", "D_unlabeled"]
@@ -271,7 +269,7 @@ def _build_maskers(
     config: Config,
 ) -> tuple[GradientMasker, ActivationMasker]:
     module_view = _resolve_module_traversal_view(model)
-    return GradientMasker(registry), ActivationMasker(module_view, registry=registry, config=config)
+    return GradientMasker(registry), ActivationMasker(module_view)
 
 
 def _iter_safemoe_layers(model: nn.Module):
