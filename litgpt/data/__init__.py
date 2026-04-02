@@ -12,6 +12,7 @@ from litgpt.data.lit_data import LitData
 from litgpt.data.longform import LongForm
 from litgpt.data.microllama import MicroLlama
 from litgpt.data.openwebtext import OpenWebText
+from litgpt.data.safedata import SafeData, SafeDataModule
 from litgpt.data.text_files import TextFiles
 from litgpt.data.tinyllama import TinyLlama
 from litgpt.data.tinystories import TinyStories
@@ -28,6 +29,8 @@ __all__ = [
     "DataModule",
     "LongForm",
     "OpenWebText",
+    "SafeData",
+    "SafeDataModule",
     "SFTDataset",
     "TextFiles",
     "TinyLlama",

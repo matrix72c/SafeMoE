@@ -52,7 +52,7 @@ from litgpt.utils import (
 )
 
 # SGTM: safemoe-specific imports for single-optimizer masking infrastructure
-from litgpt.safemoe.data.datamodule import SafeDataModule
+from litgpt.data import SafeData
 from litgpt.safemoe.masking import ActivationMasker, GradientMasker, HarmfulParamRegistry
 from litgpt.model import SafeMoELayer
 from litgpt.safemoe.surgery import setup as surgery_setup
@@ -445,7 +445,7 @@ def setup(
     precision: Literal["bf16-true", "bf16-mixed", "32-true", None] = None,
     initial_checkpoint_dir: Optional[Path] = None,
     resume: Union[bool, Literal["auto"], Path] = False,
-    data: Optional[SafeDataModule] = None,
+    data: Optional[SafeData] = None,
     train: TrainArgs = TrainArgs(
         save_interval=1000,
         log_interval=1,
@@ -488,7 +488,7 @@ def setup(
         precision: The precision to use for training.
         initial_checkpoint_dir: Optional path to a checkpoint directory to initialize the model from.
         resume: Path to a checkpoint directory to resume from, or ``True`` to resume from the latest checkpoint.
-        data: A ``SafeDataModule`` providing D_std, D_harmful, D_unlabeled loaders.
+        data: A ``SafeData`` providing D_std, D_harmful, D_unlabeled loaders.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
         eval: Evaluation-related arguments.
         optimizer: An optimizer name (such as "AdamW") or config.
@@ -545,7 +545,7 @@ def setup(
 
     hparams = capture_hparams()
     if data is None:
-        raise ValueError("data (SafeDataModule) is required for SGTM training")
+        raise ValueError("data (SafeData) is required for SGTM training")
 
     config = ensure_config(model_config)
     if initial_checkpoint_dir is not None:
@@ -632,7 +632,7 @@ def main(
     initial_checkpoint_dir: Optional[Path],
     resume: Union[bool, Literal["auto"], Path],
     config: Config,
-    data: SafeDataModule,
+    data: SafeData,
     out_dir: Path,
     tokenizer_dir: Optional[Path],
     tokenizer: Optional[Tokenizer],
@@ -762,7 +762,7 @@ def fit(
     fabric: L.Fabric,
     devices: int,
     state: dict,
-    data: SafeDataModule,
+    data: SafeData,
     out_dir: Path,
     tokenizer_dir: Optional[Path],
     train: TrainArgs,
@@ -1058,7 +1058,7 @@ def evaluate_with_ablation(
 # ---------------------------------------------------------------------------
 
 def initialize_data_loaders(
-    data: SafeDataModule,
+    data: SafeData,
     tokenizer: Optional[Tokenizer],
     train: TrainArgs,
     block_size: int,

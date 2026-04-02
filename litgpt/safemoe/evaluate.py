@@ -328,7 +328,7 @@ def _get_val_loaders(ckpt_dir: Path, config: Config, data_mock=None) -> dict:
     if data_mock is not None:
         return data_mock.val_dataloaders()
 
-    from litgpt.safemoe.data.datamodule import SafeDataModule
+    from litgpt.data import SafeData
 
     cache_dir = Path("data/.cache")
     datasets_cfg = {}
@@ -344,7 +344,7 @@ def _get_val_loaders(ckpt_dir: Path, config: Config, data_mock=None) -> dict:
 
     if not datasets_cfg:
         raise ValueError(
-            f"Cannot construct SafeDataModule for evaluation: "
+            f"Cannot construct SafeData for evaluation: "
             f"no datasets found in {ckpt_dir / 'hyperparameters.yaml'}. "
             "Pass a data_mock or ensure hyperparameters.yaml has data.init_args.datasets."
         )
@@ -353,7 +353,7 @@ def _get_val_loaders(ckpt_dir: Path, config: Config, data_mock=None) -> dict:
     if tokenizer_name is not None:
         tokenizer = _TokenizerModelNameAlias(tokenizer, tokenizer_name)
 
-    data = SafeDataModule(cache_dir=cache_dir, datasets=datasets_cfg)
+    data = SafeData(cache_dir=cache_dir, datasets=datasets_cfg)
     raw_value = os.environ.get("SAFEMOE_EVAL_NUM_WORKERS")
     if raw_value is None:
         data.num_workers = 0

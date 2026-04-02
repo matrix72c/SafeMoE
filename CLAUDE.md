@@ -118,12 +118,12 @@ When modifying training code, keep this partitioning explicit and inspectable. R
 - The training loop samples among dataset splits, applies activation/gradient masking as needed, logs routing metrics, and can run ablated validation by temporarily zeroing `theta_harmful`.
 
 ### 5. SafeMoE data pipeline
-- `litgpt/safemoe/data/datamodule.py` defines `SafeDataModule`, which organizes multiple datasets into three training streams:
+- `litgpt/data/safedata.py` defines `SafeData`, which organizes multiple datasets into three training streams:
   - `D_std`
   - `D_harmful`
   - `D_unlabeled`
 - Each configured dataset has a `role` (`std` or `harmful`) and `label_ratio`; the labeled portion is routed into either `D_std` or `D_harmful`, while the remainder becomes `D_unlabeled`.
-- `prepare_data()` delegates to `litgpt.safemoe.data.prepare.prepare_dataset` to tokenize and cache streaming-ready splits under `data/.cache/...`.
+- `prepare_data()` delegates to `litgpt.data.safe_prepare.prepare_dataset` to tokenize and cache streaming-ready splits under `data/.cache/...`.
 - Training uses LitData streaming datasets/loaders rather than loading everything into memory.
 
 ### 6. Surgery, ablation, and evaluation

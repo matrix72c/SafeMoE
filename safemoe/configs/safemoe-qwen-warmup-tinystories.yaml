@@ -35,7 +35,7 @@ eval:
   final_validation: true
 
 data:
-  class_path: litgpt.safemoe.data.datamodule.SafeDataModule
+  class_path: litgpt.data.SafeData
   init_args:
     cache_dir: data/.cache
     seed: 42
