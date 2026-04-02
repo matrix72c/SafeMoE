@@ -1,1 +1,1 @@
-"""SafeMoE package."""
+from litgpt.safemoe import *

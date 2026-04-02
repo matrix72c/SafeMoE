@@ -15,6 +15,7 @@ def parser_commands() -> List[str]:
         "finetune_adapter",
         "finetune_adapter_v2",
         "pretrain",
+        "pretrain_safemoe",
         "generate",
         "generate_full",
         "generate_adapter",
@@ -28,6 +29,9 @@ def parser_commands() -> List[str]:
         "merge_lora",
         "evaluate",
         "serve",
+        "safemoe_ablate",
+        "safemoe_evaluate",
+        "safemoe_surgery",
     ]
 
 

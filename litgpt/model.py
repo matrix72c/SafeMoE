@@ -6,6 +6,7 @@ Based on the nanoGPT implementation: https://github.com/karpathy/nanoGPT and
 https://github.com/EleutherAI/gpt-neox/tree/main/megatron/model.
 """
 
+import copy
 import math
 from functools import partial
 from typing import Any, List, Optional, Tuple, Union
@@ -812,6 +813,68 @@ class LLaMAMoE(nn.Module):
         for mask, expert in zip(masks, self.experts):
             token_idx, expert_idx = torch.where(mask)
             y[token_idx] += probs[token_idx, expert_idx, None] * expert(x[token_idx])
+
+        y = y.view(B, T, C)
+        if self.config.n_shared_expert:
+            y = y + self.shared_experts(residual_x)
+        return y
+
+
+class SafeMoELayer(LLaMAMoE):
+    def __init__(self, config: Config, init_strategy: str = "random") -> None:
+        super().__init__(config)
+        self._activation_masking_enabled: bool = False
+        self._harmful_indices: list[int] = list(getattr(config, "harmful_expert_indices", []))
+        self._last_indices: Optional[torch.Tensor] = None
+        self._last_harmful_routing_mass: Optional[torch.Tensor] = None
+        self._harmful_index_tensor: Optional[torch.Tensor] = None
+
+        if init_strategy == "copy":
+            std_indices = [i for i in range(len(self.experts)) if i not in self._harmful_indices]
+            if std_indices:
+                src_state = copy.deepcopy(self.experts[std_indices[0]].state_dict())
+                for idx in self._harmful_indices:
+                    self.experts[idx].load_state_dict(src_state)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, C = x.size()
+        residual_x = x.clone()
+        x_flat = x.view(-1, C)
+
+        if not self.config.n_expert_groups:
+            router = self.gate(x_flat)
+            probs, indices = torch.topk(router, self.config.n_expert_per_token)
+            self._last_indices = indices
+            probs = F.softmax(probs, dim=1, dtype=torch.float).to(dtype=x_flat.dtype)
+        else:
+            probs, indices = self.gate(x_flat)
+            self._last_indices = indices
+
+        if self.config.routed_scaling_factor != 1.0:
+            probs = probs * self.config.routed_scaling_factor
+
+        if self._harmful_indices:
+            harmful_indices = self._harmful_index_tensor
+            if harmful_indices is None or harmful_indices.device != indices.device:
+                harmful_indices = torch.tensor(self._harmful_indices, device=indices.device)
+                self._harmful_index_tensor = harmful_indices
+            harmful_mask = (indices.unsqueeze(-1) == harmful_indices).any(dim=-1)
+            harmful_mass = (probs * harmful_mask.to(dtype=probs.dtype)).sum(dim=1)
+            self._last_harmful_routing_mass = harmful_mass.mean()
+        else:
+            self._last_harmful_routing_mass = probs.new_zeros(())
+
+        masks = indices.unsqueeze(-1) == torch.arange(self.config.n_expert, device=x_flat.device)
+        masks = masks.permute(2, 0, 1)
+
+        y = torch.zeros_like(x_flat)
+        for expert_idx, (mask, expert) in enumerate(zip(masks, self.experts)):
+            if self._activation_masking_enabled and expert_idx in self._harmful_indices:
+                continue
+            token_idx, sel_expert_idx = torch.where(mask)
+            if token_idx.numel() == 0:
+                continue
+            y[token_idx] += probs[token_idx, sel_expert_idx, None] * expert(x_flat[token_idx])
 
         y = y.view(B, T, C)
         if self.config.n_shared_expert:

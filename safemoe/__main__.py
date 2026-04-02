@@ -9,10 +9,10 @@ Usage:
 """
 from jsonargparse import CLI
 
-from safemoe.pretrain import setup as pretrain_fn
-from safemoe.ablate import setup as ablate_fn
-from safemoe.evaluate import evaluate_cli as evaluate_fn
-from safemoe.surgery import setup as surgery_fn
+from litgpt.safemoe.ablate import setup as ablate_fn
+from litgpt.safemoe.evaluate import evaluate_cli as evaluate_fn
+from litgpt.safemoe.pretrain import setup as pretrain_fn
+from litgpt.safemoe.surgery import setup as surgery_fn
 
 PARSER_DATA = {
     "pretrain": pretrain_fn,

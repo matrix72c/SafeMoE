@@ -99,6 +99,9 @@ class Config:
     first_k_dense_replace: Optional[int] = None
     routed_scaling_factor: float = 1.0
     norm_topk_prob: bool = False
+    harmful_expert_indices: list[int] = field(default_factory=list)
+    harmful_attn_heads: list[int] = field(default_factory=list)
+    num_harmful_experts: int = 0
     # GPT before/after blocks
     scale_embeddings: bool = False
     lm_head_bias: bool = False
@@ -224,6 +227,8 @@ class Config:
         # `self.mlp_class_name` cannot be the type to keep the config serializable
         import litgpt.model
 
+        if self.mlp_class_name == "LLaMAMoE" and self.harmful_expert_indices:
+            return litgpt.model.SafeMoELayer
         return getattr(litgpt.model, self.mlp_class_name)
 
     @property
