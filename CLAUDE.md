@@ -112,7 +112,7 @@ When modifying training code, keep this partitioning explicit and inspectable. R
 ### 4. SafeMoE training stages
 - `litgpt/safemoe/pretrain.py` is the main SafeMoE training entrypoint. It is a fork of LitGPT pretraining with a single-optimizer, split-aware SGTM loop.
 - Two stages are supported:
-  - `stage: warmup`: only `D_std` and `D_harmful` are active, plus an auxiliary routing loss that pushes harmful tokens toward harmful experts and standard tokens away from them.
+  - `stage: warmup`: samples from the configured training splits, including `D_unlabeled` when present, while the auxiliary routing loss only applies to `D_std` and `D_harmful` to push harmful tokens toward harmful experts and standard tokens away from them.
   - `stage: transfer`: full SGTM training over `D_std`, `D_harmful`, and `D_unlabeled`.
 - Warmup can derive a checkpoint on the fly from a base model via `base_checkpoint`, `num_harmful_experts`, `num_harmful_attn_heads`, and `epsilon`; this flows through `maybe_prepare_warmup_checkpoint()` into `litgpt.safemoe.surgery.setup()`.
 - The training loop samples among dataset splits, applies activation/gradient masking as needed, logs routing metrics, and can run ablated validation by temporarily zeroing `theta_harmful`.

@@ -22,7 +22,6 @@ from lightning.fabric.strategies import FSDPStrategy
 from lightning.fabric.utilities.throughput import ThroughputMonitor, measure_flops
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.utils.data import DataLoader
-from torchmetrics.aggregation import RunningMean
 from typing_extensions import Literal
 
 from litgpt import Tokenizer
@@ -173,6 +172,12 @@ def warmup_routing_loss(
     harmful_mass_floor: float = 0.6,
     std_mass_ceiling: float = 0.4,
 ) -> torch.Tensor:
+    """Return the warmup auxiliary routing loss for labeled splits only.
+
+    D_harmful pushes harmful routing mass above ``harmful_mass_floor``.
+    D_std pushes harmful routing mass below ``std_mass_ceiling``.
+    D_unlabeled contributes no auxiliary routing loss during warmup.
+    """
     if split_label == "D_harmful":
         return F.softplus(harmful_mass.new_tensor(harmful_mass_floor) - harmful_mass)
     if split_label == "D_std":
@@ -445,6 +450,28 @@ def _format_validation_status(summary: ValidationSummary) -> str:
     )
 
 
+def _capture_rng_state() -> dict[str, object]:
+    rng_state: dict[str, object] = {
+        "python_rng_state": random.getstate(),
+        "torch_rng_state": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        rng_state["torch_cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
+    return rng_state
+
+
+def _restore_rng_state(state: dict[str, object]) -> None:
+    python_rng_state = state.get("python_rng_state")
+    torch_rng_state = state.get("torch_rng_state")
+    if python_rng_state is None or torch_rng_state is None:
+        return
+    random.setstate(python_rng_state)
+    torch.set_rng_state(torch_rng_state)
+    torch_cuda_rng_state_all = state.get("torch_cuda_rng_state_all")
+    if torch_cuda_rng_state_all is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(torch_cuda_rng_state_all)
+
+
 def ensure_config(config: Union[Config, Config]) -> Config:
     if isinstance(config, Config):
         return config
@@ -512,7 +539,8 @@ def setup(
         precision: The precision to use for training.
         initial_checkpoint_dir: Optional path to a checkpoint directory to initialize the model from.
         resume: Path to a checkpoint directory to resume from, or ``True`` to resume from the latest checkpoint.
-        data: A ``SafeData`` providing D_std, D_harmful, D_unlabeled loaders.
+        data: A ``SafeData`` providing D_std, D_harmful, and optional D_unlabeled loaders.
+            Warmup and transfer both sample from whichever configured loaders are present.
         train: Training-related arguments. See ``litgpt.args.TrainArgs`` for details.
         eval: Evaluation-related arguments.
         optimizer: An optimizer name (such as "AdamW") or config.
@@ -523,7 +551,10 @@ def setup(
         seed: The random seed to use for reproducibility.
         upsample_std: Sampling weight for D_std split. Required.
         upsample_harmful: Sampling weight for D_harmful split. Required.
-        upsample_unlabeled: Sampling weight for D_unlabeled split. Required.
+        upsample_unlabeled: Sampling weight for D_unlabeled split. Required. Set to 0.0 to disable
+            unlabeled sampling; nonzero values are valid during both warmup and transfer.
+        stage: ``"warmup"`` applies the auxiliary routing loss only on D_std and D_harmful, while
+            ``"transfer"`` runs the full SGTM objective. Warmup may still sample D_unlabeled when configured.
         base_checkpoint: Base checkpoint used to derive a warmup surgery checkpoint.
         num_harmful_experts: Count of harmful experts for warmup auto-surgery.
         num_harmful_attn_heads: Count of harmful attention heads for warmup auto-surgery.
@@ -702,16 +733,13 @@ def main(
         "optimizer": optimizer,
         "iter_num": 0,
         "step_count": 0,
-        "split_label": "D_std",
     }
 
     resume = find_resume_path(resume, out_dir)
     if resume:
         fabric.print(f"Resuming training from {resume}")
         fabric.load(resume, state)
-
-    # SGTM: Pitfall 3 fix — restore random state for split sampling reproducibility on resume
-    random.seed(seed + state["iter_num"])
+        _restore_rng_state(state)
 
     gradient_masker, activation_masker = _build_maskers(model, registry)
 
@@ -814,12 +842,10 @@ def fit(
     if val_loaders is None:
         raise ValueError("fit() requires split-aware val_loaders")
 
-    latest_validation_summary: Optional[ValidationSummary] = None
     if eval.initial_validation:
         initial_summary = collect_validation_summary(fabric, model, val_loaders, max_iters=eval.max_iters)
         fabric.log_dict(initial_summary.scalar_metrics, step=max(state["iter_num"] - 1, 0))
         validation_status = _format_validation_status(initial_summary)
-        latest_validation_summary = initial_summary
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     else:
@@ -866,11 +892,9 @@ def fit(
     }
     weights = [split_weights[label] for label in active_labels]
 
-    running_loss = RunningMean(window=accum_iters, sync_on_compute=False).to(fabric.device)
     fabric.barrier()
     total_t0 = time.perf_counter()
 
-    # SGTM: warmup_iters uses D_std loader length as proxy for train_dataloader length
     warmup_iters = train.warmup_iters(devices, num_nodes, max_iters, data.get_loader("D_std"))
 
     # SGTM: iter_num counts micro-batches; step_count counts optimizer steps
@@ -880,7 +904,6 @@ def fit(
 
         # SGTM: sample split label once per optimizer step (Pattern 1)
         split_label = random.choices(active_labels, weights=weights, k=1)[0]
-        state["split_label"] = split_label
 
         # SGTM: LR update for the shared optimizer
         base_lr = optimizer.defaults["lr"]
@@ -889,7 +912,8 @@ def fit(
             pg["lr"] = lr
 
         # SGTM: 3-path masking template (Pattern 2)
-        # D_std: enable activation masker before the micro-batch window; disable in finally
+        # During warmup, D_unlabeled may still be sampled, but the auxiliary routing loss stays zero there.
+        # D_std enables activation masking before the micro-batch window and disables it in finally.
         if split_label == "D_std":
             activation_masker.enable()
 
@@ -912,6 +936,7 @@ def fit(
                     lm_loss = chunked_cross_entropy(logits, targets)
                     if stage == "warmup":
                         harmful_mass = collect_warmup_routing_mass(model)
+                        # Warmup may sample D_unlabeled, but only D_std and D_harmful receive routing loss.
                         routing_loss = warmup_routing_loss(
                             harmful_mass,
                             split_label,
@@ -929,7 +954,6 @@ def fit(
                 routing_loss_values.append(routing_loss.detach())
                 total_loss_values.append(total_loss.detach())
                 harmful_mass_values.append(harmful_mass.detach())
-                running_loss.update(total_loss.detach())
 
         finally:
             # SGTM: always disable activation masker (try/finally avoids masker stuck True on error)
@@ -946,7 +970,6 @@ def fit(
         state["step_count"] += 1
 
         if state["iter_num"] % log_iter_interval == 0:
-            loss_val = _reduce_scalar_mean(fabric, running_loss.compute()).item()
             lm_loss_val = _reduce_scalar_mean(fabric, torch.stack(lm_loss_values).mean()).item()
             routing_loss_val = _reduce_scalar_mean(fabric, torch.stack(routing_loss_values).mean()).item()
             total_loss_val = _reduce_scalar_mean(fabric, torch.stack(total_loss_values).mean()).item()
@@ -987,7 +1010,7 @@ def fit(
                     "D_harmful": "loss_D_harmful",
                     "D_unlabeled": "loss_D_unlabeled",
                 }[split_label]
-                metrics[loss_key] = loss_val
+                metrics[loss_key] = total_loss_val
             fabric.print(
                 f"step {state['step_count']} [{split_label}] | iter {metrics['iter']} |"
                 f" loss: {metrics['loss']:.3f},"
@@ -1003,7 +1026,6 @@ def fit(
         if state["step_count"] % eval.interval == 0:
             t0 = time.perf_counter()
             validation_summary = collect_validation_summary(fabric, model, val_loaders, max_iters=eval.max_iters)
-            latest_validation_summary = validation_summary
             validation_status = _format_validation_status(validation_summary)
             td = time.perf_counter() - t0
 
@@ -1033,7 +1055,6 @@ def fit(
     # Final validation
     if eval.final_validation:
         final_summary = collect_validation_summary(fabric, model, val_loaders, max_iters=eval.max_iters)
-        latest_validation_summary = final_summary
         fabric.log_dict(final_summary.scalar_metrics, step=state["iter_num"])
         fabric.print(f"Final evaluation | val { _format_validation_status(final_summary) }")
 
@@ -1164,6 +1185,7 @@ def save_checkpoint(fabric, state, tokenizer_dir, checkpoint_file, include_optim
 
 
 def _checkpoint_state_for_save(state, include_optimizer: bool):
+    state.update(_capture_rng_state())
     if include_optimizer:
         _ensure_optimizer_state_coverage(state["optimizer"])
         return state
