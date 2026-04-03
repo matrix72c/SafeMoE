@@ -824,49 +824,57 @@ class SafeMoELayer(LLaMAMoE):
         super().__init__(config)
         self._activation_masking_enabled: bool = False
         self._harmful_indices: list[int] = list(getattr(config, "harmful_expert_indices", []))
+        harmful_expert_set = set(self._harmful_indices)
+        self._harmful_expert_mask: tuple[bool, ...] = tuple(
+            expert_idx in harmful_expert_set for expert_idx in range(config.n_expert)
+        )
+        harmful_lookup = torch.zeros(config.n_expert, dtype=torch.bool)
+        if self._harmful_indices:
+            harmful_lookup[self._harmful_indices] = True
+        self.register_buffer("_harmful_lookup", harmful_lookup, persistent=False)
         self._last_indices: Optional[torch.Tensor] = None
         self._last_harmful_routing_mass: Optional[torch.Tensor] = None
-        self._harmful_index_tensor: Optional[torch.Tensor] = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.size()
-        residual_x = x.clone()
+        residual_x = x
         x_flat = x.view(-1, C)
 
         if not self.config.n_expert_groups:
             router = self.gate(x_flat)
             probs, indices = torch.topk(router, self.config.n_expert_per_token)
-            self._last_indices = indices
             probs = F.softmax(probs, dim=1, dtype=torch.float).to(dtype=x_flat.dtype)
         else:
             probs, indices = self.gate(x_flat)
-            self._last_indices = indices
+        self._last_indices = indices
 
         if self.config.routed_scaling_factor != 1.0:
             probs = probs * self.config.routed_scaling_factor
 
         if self._harmful_indices:
-            harmful_indices = self._harmful_index_tensor
-            if harmful_indices is None or harmful_indices.device != indices.device:
-                harmful_indices = torch.tensor(self._harmful_indices, device=indices.device)
-                self._harmful_index_tensor = harmful_indices
-            harmful_mask = (indices.unsqueeze(-1) == harmful_indices).any(dim=-1)
+            harmful_mask = self._harmful_lookup[indices]
             harmful_mass = (probs * harmful_mask.to(dtype=probs.dtype)).sum(dim=1)
             self._last_harmful_routing_mass = harmful_mass.mean()
         else:
             self._last_harmful_routing_mass = probs.new_zeros(())
 
-        masks = indices.unsqueeze(-1) == torch.arange(self.config.n_expert, device=x_flat.device)
-        masks = masks.permute(2, 0, 1)
+        route_token_indices = torch.arange(x_flat.size(0), device=x_flat.device).repeat_interleave(
+            self.config.n_expert_per_token
+        )
+        route_expert_indices = indices.reshape(-1)
+        route_probs = probs.reshape(-1)
 
         y = torch.zeros_like(x_flat)
-        for expert_idx, (mask, expert) in enumerate(zip(masks, self.experts)):
-            if self._activation_masking_enabled and expert_idx in self._harmful_indices:
+        for expert_idx, expert in enumerate(self.experts):
+            if self._activation_masking_enabled and self._harmful_expert_mask[expert_idx]:
                 continue
-            token_idx, sel_expert_idx = torch.where(mask)
-            if token_idx.numel() == 0:
+            route_positions = torch.nonzero(route_expert_indices == expert_idx, as_tuple=False).flatten()
+            if route_positions.numel() == 0:
                 continue
-            y[token_idx] += probs[token_idx, sel_expert_idx, None] * expert(x_flat[token_idx])
+            token_idx = route_token_indices[route_positions]
+            expert_input = x_flat[token_idx]
+            expert_weight = route_probs[route_positions].unsqueeze(-1)
+            y.index_add_(0, token_idx, expert_weight * expert(expert_input))
 
         y = y.view(B, T, C)
         if self.config.n_shared_expert:
