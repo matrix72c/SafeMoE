@@ -14,11 +14,10 @@ import torch
 import yaml
 from lightning.fabric.plugins.precision.fsdp import FSDPPrecision
 from lightning.fabric.strategies import FSDPStrategy
-from torch.utils.data import DataLoader
 
 from litgpt.config import Config
 from litgpt.model import GPT, Block
-from litgpt.safemoe.pretrain import ValidationSummary, collect_validation_summary
+from litgpt.safemoe.pretrain import ValidationSummary, _setup_split_dataloaders, collect_validation_summary
 from litgpt.utils import check_valid_checkpoint_dir, lazy_load, parse_devices
 
 # ---------------------------------------------------------------------------
@@ -379,13 +378,7 @@ def _get_val_loaders(ckpt_dir: Path, config: Config, data_mock=None) -> dict:
             )
 
     data.connect(tokenizer=tokenizer, batch_size=1, max_seq_length=config.block_size)
-    return data._build_val_loader_iterables(batch_size=1, drop_last=False)
-
-
-def _prepare_eval_loader(fabric: L.Fabric, loader: object) -> object:
-    if isinstance(loader, DataLoader):
-        return fabric.setup_dataloaders(loader)
-    return loader
+    return data._build_val_dataloaders(batch_size=1, drop_last=False)
 
 
 
@@ -486,10 +479,7 @@ def _create_eval_session(
 
 
 def _compute_split_metrics(session: _EvalSession) -> tuple[dict[str, float], dict[str, float]]:
-    prepared_val_loaders = {
-        split_name: _prepare_eval_loader(session.fabric, loader)
-        for split_name, loader in session.val_loaders.items()
-    }
+    prepared_val_loaders = _setup_split_dataloaders(session.fabric, session.val_loaders)
     summary = collect_validation_summary(
         session.fabric,
         session.model,

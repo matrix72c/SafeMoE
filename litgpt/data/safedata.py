@@ -47,6 +47,7 @@ class SafeData(DataModule):
     max_seq_length: int = field(default=-1, init=False, repr=False)
     _loaders: dict = field(default=None, init=False, repr=False)
     _val_datasets: dict = field(default=None, init=False, repr=False)
+    _val_loaders: dict = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         self._configs = {}
@@ -102,12 +103,13 @@ class SafeData(DataModule):
             return datasets[0]
         return CombinedStreamingDataset(datasets=datasets, seed=self.seed, weights=weights, iterate_over_all=False)
 
-    def _streaming_dataloader(self, dataset, *, num_workers: int, drop_last: bool):
+    def _streaming_dataloader(self, dataset, *, num_workers: int, drop_last: bool, batch_size: int | None = None):
         from litdata.streaming import StreamingDataLoader
 
+        effective_batch_size = self.batch_size if batch_size is None else batch_size
         return StreamingDataLoader(
             dataset,
-            batch_size=self.batch_size,
+            batch_size=effective_batch_size,
             num_workers=num_workers,
             pin_memory=True,
             drop_last=drop_last,
@@ -234,46 +236,18 @@ class SafeData(DataModule):
                 val_datasets[split_name] = self._combine_datasets(datasets)
         return val_datasets
 
-    def _build_val_loader_iterables(self, *, batch_size: int | None = None, drop_last: bool = False) -> dict[str, object]:
+    def _build_val_dataloaders(self, *, batch_size: int | None = None, drop_last: bool = False) -> dict[str, object]:
         effective_batch_size = self.batch_size if batch_size is None else batch_size
         if effective_batch_size is None or effective_batch_size <= 0:
             effective_batch_size = 1
-
-        class _DatasetBatchIterable:
-            def __init__(self, dataset: object, batch_size: int, drop_last: bool = False) -> None:
-                self.dataset = dataset
-                self.batch_size = batch_size
-                self.drop_last = drop_last
-
-            def __iter__(self):
-                batch = None
-                batch_fill = 0
-                for sample in self.dataset:
-                    sample = sample.clone()
-                    if batch is None:
-                        batch = sample.new_empty((self.batch_size, *sample.shape))
-                    batch[batch_fill].copy_(sample)
-                    batch_fill += 1
-                    if batch_fill == self.batch_size:
-                        yield batch
-                        batch = None
-                        batch_fill = 0
-                if batch is not None and batch_fill and not self.drop_last:
-                    yield batch[:batch_fill]
-
-            def __len__(self) -> int:
-                try:
-                    dataset_length = len(self.dataset)
-                except TypeError as ex:
-                    raise TypeError("Validation iterable length is unavailable for this dataset") from ex
-                if dataset_length is None:
-                    raise TypeError("Validation iterable length is unavailable for this dataset")
-                if self.drop_last:
-                    return dataset_length // self.batch_size
-                return (dataset_length + self.batch_size - 1) // self.batch_size
-
+        num_workers = self._effective_num_workers(loader_count=max(len(self.val_datasets()), 1))
         return {
-            split_name: _DatasetBatchIterable(dataset, batch_size=effective_batch_size, drop_last=drop_last)
+            split_name: self._streaming_dataloader(
+                dataset,
+                num_workers=num_workers,
+                drop_last=drop_last,
+                batch_size=effective_batch_size,
+            )
             for split_name, dataset in self.val_datasets().items()
         }
 
@@ -325,6 +299,7 @@ class SafeData(DataModule):
             if group["datasets"]
         }
         self._val_datasets = None
+        self._val_loaders = None
 
     def get_loader(self, split_name: str):
         if self._loaders is None:
@@ -339,7 +314,9 @@ class SafeData(DataModule):
 
     def val_dataloaders(self) -> dict:
         """Returns {D_std: DataLoader, D_harmful: DataLoader}. No D_unlabeled val set."""
-        return self._build_val_loader_iterables(drop_last=False)
+        if self._val_loaders is None:
+            self._val_loaders = self._build_val_dataloaders(drop_last=False)
+        return dict(self._val_loaders)
 
     def train_dataloader(self):
         return self.get_loader("D_std")
