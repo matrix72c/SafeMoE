@@ -266,7 +266,6 @@ def _build_optimizer(
 def _build_maskers(
     model: nn.Module,
     registry: HarmfulParamRegistry,
-    config: Config,
 ) -> tuple[GradientMasker, ActivationMasker]:
     module_view = _resolve_module_traversal_view(model)
     return GradientMasker(registry), ActivationMasker(module_view)
@@ -315,6 +314,32 @@ def _reduce_routing_counts(
     return int(dispatch_tensor.item()), int(harmful_tensor.item())
 
 
+def _reduce_validation_totals(
+    fabric: L.Fabric,
+    total_loss: float,
+    count: int,
+) -> tuple[torch.Tensor, int]:
+    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+        return torch.tensor(total_loss, device=fabric.device), count
+    loss_tensor = torch.tensor(total_loss, device=fabric.device, dtype=torch.float32)
+    count_tensor = torch.tensor(count, device=fabric.device, dtype=torch.long)
+    torch.distributed.all_reduce(loss_tensor)
+    torch.distributed.all_reduce(count_tensor)
+    return loss_tensor, int(count_tensor.item())
+
+
+def _reduce_scalar_mean(fabric: L.Fabric, value: Union[torch.Tensor, float]) -> torch.Tensor:
+    if not isinstance(value, torch.Tensor):
+        value = torch.tensor(value, device=fabric.device, dtype=torch.float32)
+    else:
+        value = value.detach().to(device=fabric.device, dtype=torch.float32)
+    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+        return value
+    torch.distributed.all_reduce(value)
+    value /= torch.distributed.get_world_size()
+    return value
+
+
 @torch.no_grad()
 def _evaluate_validation_split(
     fabric: L.Fabric,
@@ -359,7 +384,8 @@ def _evaluate_validation_split(
         model.train(was_training)
         fabric.barrier()
 
-    val_loss = torch.tensor(total_loss / max(count, 1), device=fabric.device)
+    total_loss_tensor, total_count = _reduce_validation_totals(fabric, total_loss=total_loss, count=count)
+    val_loss = total_loss_tensor / max(total_count, 1)
     total_dispatches, harmful_dispatches = _reduce_routing_counts(
         fabric,
         total_dispatches=total_dispatches,
@@ -372,7 +398,7 @@ def _evaluate_validation_split(
         dispatch_count=total_dispatches,
         harmful_dispatches=harmful_dispatches,
         routing_harmful_frac=routing_harmful_frac,
-        batches_evaluated=count,
+        batches_evaluated=total_count,
     )
 
 
@@ -687,7 +713,7 @@ def main(
     # SGTM: Pitfall 3 fix — restore random state for split sampling reproducibility on resume
     random.seed(seed + state["iter_num"])
 
-    gradient_masker, activation_masker = _build_maskers(model, registry, config)
+    gradient_masker, activation_masker = _build_maskers(model, registry)
 
     train_time = time.perf_counter()
 
@@ -737,12 +763,13 @@ def main(
         fabric.print(f"  pre:  {initial_checkpoint_dir}")
         fabric.print(f"  post: {out_dir / 'final'}")
 
+    elapsed_train_time = time.perf_counter() - train_time
     separator = "-" * 40
     fabric.print(separator)
     fabric.print("| Performance")
     fabric.print(f"| - Total tokens  : {total_tokens:,}")
-    fabric.print(f"| - Training Time : {(time.perf_counter() - train_time):.2f} s")
-    fabric.print(f"| - Tok/sec       : {total_tokens / train_time:.2f} tok/s")
+    fabric.print(f"| - Training Time : {elapsed_train_time:.2f} s")
+    fabric.print(f"| - Tok/sec       : {total_tokens / elapsed_train_time:.2f} tok/s")
     fabric.print("| " + "-" * 40)
 
     if fabric.device.type == "cuda":
@@ -919,11 +946,11 @@ def fit(
         state["step_count"] += 1
 
         if state["iter_num"] % log_iter_interval == 0:
-            loss_val = running_loss.compute().item()
-            lm_loss_val = torch.stack(lm_loss_values).mean().item()
-            routing_loss_val = torch.stack(routing_loss_values).mean().item()
-            total_loss_val = torch.stack(total_loss_values).mean().item()
-            harmful_mass_val = torch.stack(harmful_mass_values).mean().item()
+            loss_val = _reduce_scalar_mean(fabric, running_loss.compute()).item()
+            lm_loss_val = _reduce_scalar_mean(fabric, torch.stack(lm_loss_values).mean()).item()
+            routing_loss_val = _reduce_scalar_mean(fabric, torch.stack(routing_loss_values).mean()).item()
+            total_loss_val = _reduce_scalar_mean(fabric, torch.stack(total_loss_values).mean()).item()
+            harmful_mass_val = _reduce_scalar_mean(fabric, torch.stack(harmful_mass_values).mean()).item()
             t1 = time.perf_counter()
             throughput.update(
                 time=(t1 - total_t0),
@@ -1028,6 +1055,7 @@ def evaluate_with_ablation(
     saved = [p.data.clone() for p in harmful_params]
     was_training = model.training
     max_iters = eval_args.max_iters if eval_args is not None else 100
+    summary: Optional[ValidationSummary] = None
     try:
         for p in harmful_params:
             p.data.zero_()
@@ -1043,6 +1071,8 @@ def evaluate_with_ablation(
         for p, saved_data in zip(harmful_params, saved):
             p.data.copy_(saved_data)
         model.train(was_training)
+    if summary is None:
+        raise RuntimeError("Ablation evaluation did not produce a validation summary.")
     fabric.log_dict(summary.scalar_metrics, step=iter_num)
     fabric.print(
         f"Ablation eval (iter {iter_num}): "
