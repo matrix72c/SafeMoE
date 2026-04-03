@@ -33,7 +33,12 @@ from litgpt.constants import _TORCH_EQUAL_2_7, _TORCH_EQUAL_2_8
 from litgpt.data import SafeData
 from litgpt.model import GPT, Block, CausalSelfAttention, Config, LLaMAMLP, SafeMoELayer
 from litgpt.parser_config import save_hyperparameters
-from litgpt.safemoe.masking import ActivationMasker, GradientMasker, HarmfulParamRegistry
+from litgpt.safemoe.masking import (
+    ActivationMasker,
+    GradientMasker,
+    HarmfulParamRegistry,
+    temporarily_ablate_harmful_params,
+)
 from litgpt.safemoe.surgery import setup as surgery_setup
 from litgpt.types import LoggerChoice
 from litgpt.utils import (
@@ -252,6 +257,18 @@ def _build_registry(model: nn.Module, config: Config) -> HarmfulParamRegistry:
     return HarmfulParamRegistry(_resolve_registry_model_view(model), config)
 
 
+def _setup_split_dataloaders(
+    fabric: L.Fabric,
+    loaders: dict[str, DataLoader],
+) -> dict[str, DataLoader]:
+    if not loaders:
+        return {}
+    prepared_loaders = fabric.setup_dataloaders(*loaders.values())
+    if len(loaders) == 1:
+        prepared_loaders = (prepared_loaders,)
+    return dict(zip(loaders.keys(), prepared_loaders))
+
+
 def _build_optimizer(
     fabric: L.Fabric,
     optimizer_config: Union[str, Dict],
@@ -288,7 +305,6 @@ def _collect_cached_routing_counts(
     model: nn.Module,
     harmful_expert_indices: list[int],
 ) -> tuple[int, int]:
-    harmful_index_set = set(harmful_expert_indices)
     total_dispatches = 0
     harmful_dispatches = 0
     for layer in _iter_safemoe_layers(model):
@@ -297,11 +313,10 @@ def _collect_cached_routing_counts(
             continue
         flat_indices = indices.detach().reshape(-1)
         total_dispatches += int(flat_indices.numel())
-        if harmful_index_set:
-            harmful_dispatches += sum(
-                int(expert_idx in harmful_index_set)
-                for expert_idx in flat_indices.tolist()
-            )
+        if not harmful_expert_indices or flat_indices.numel() == 0:
+            continue
+        harmful_lookup = layer._harmful_lookup
+        harmful_dispatches += int(harmful_lookup[flat_indices].sum().item())
     return total_dispatches, harmful_dispatches
 
 
@@ -719,10 +734,7 @@ def main(
     optimizer = _build_optimizer(fabric, optimizer, registry)
 
     data_loaders = initialize_data_loaders(data, tokenizer, train, model.max_seq_length)
-    val_loaders_for_eval = {
-        split_name: (fabric.setup_dataloaders(loader) if isinstance(loader, DataLoader) else loader)
-        for split_name, loader in data_loaders["val_loaders"].items()
-    }
+    val_loaders_for_eval = _setup_split_dataloaders(fabric, data_loaders["val_loaders"])
 
     if initial_checkpoint_dir:
         fabric.load_raw(initial_checkpoint_dir / "lit_model.pth", model)
@@ -1072,25 +1084,20 @@ def evaluate_with_ablation(
     iter_num: int,
     eval_args: Optional["EvalArgs"] = None,
 ) -> ValidationSummary:
-    harmful_params = registry.parameters_by_type("theta_harmful")
-    saved = [p.data.clone() for p in harmful_params]
     was_training = model.training
     max_iters = eval_args.max_iters if eval_args is not None else 100
     summary: Optional[ValidationSummary] = None
     try:
-        for p in harmful_params:
-            p.data.zero_()
-        summary = collect_validation_summary(
-            fabric,
-            model,
-            val_loaders,
-            max_iters=max_iters,
-            verbose=False,
-            metric_prefix="ablated_",
-        )
+        with temporarily_ablate_harmful_params(registry):
+            summary = collect_validation_summary(
+                fabric,
+                model,
+                val_loaders,
+                max_iters=max_iters,
+                verbose=False,
+                metric_prefix="ablated_",
+            )
     finally:
-        for p, saved_data in zip(harmful_params, saved):
-            p.data.copy_(saved_data)
         model.train(was_training)
     if summary is None:
         raise RuntimeError("Ablation evaluation did not produce a validation summary.")

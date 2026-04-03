@@ -32,8 +32,11 @@ MASK-04).
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
+import torch
 import torch.nn as nn
 
 if TYPE_CHECKING:
@@ -231,6 +234,55 @@ class GradientMasker:
             if param.grad is not None:
                 for s in slices:
                     param.grad[s] = 0
+
+
+@contextmanager
+def temporarily_ablate_harmful_params(
+    registry: HarmfulParamRegistry,
+    *,
+    offload_to_cpu: bool = True,
+) -> Iterator[None]:
+    """Temporarily zero harmful parameters and harmful fused-QKV slices.
+
+    Only the values needed for restoration are staged, and by default they are
+    moved to CPU to avoid an ablation-eval VRAM spike.
+    """
+
+    restore_buffers: list[tuple[nn.Parameter, torch.Tensor]] = []
+    slice_restore_buffers: list[tuple[nn.Parameter, list[tuple[slice, torch.Tensor]]]] = []
+    offload_device = torch.device("cpu") if offload_to_cpu else None
+
+    try:
+        for param in registry.parameters_by_type("theta_harmful"):
+            restore_value = (
+                param.detach().to(device=offload_device, dtype=param.dtype, copy=True)
+                if offload_device is not None
+                else param.detach().clone()
+            )
+            restore_buffers.append((param, restore_value))
+            param.data.zero_()
+
+        for param, slices in registry._qkv_harmful_metadata:
+            restore_slices: list[tuple[slice, torch.Tensor]] = []
+            for row_slice in slices:
+                restore_value = (
+                    param.data[row_slice].detach().to(device=offload_device, dtype=param.dtype, copy=True)
+                    if offload_device is not None
+                    else param.data[row_slice].detach().clone()
+                )
+                restore_slices.append((row_slice, restore_value))
+                param.data[row_slice].zero_()
+            slice_restore_buffers.append((param, restore_slices))
+
+        yield
+    finally:
+        for param, restore_value in restore_buffers:
+            restore_tensor = restore_value.to(device=param.device, dtype=param.dtype, copy=False)
+            param.data.copy_(restore_tensor)
+        for param, restore_slices in slice_restore_buffers:
+            for row_slice, restore_value in restore_slices:
+                restore_tensor = restore_value.to(device=param.device, dtype=param.dtype, copy=False)
+                param.data[row_slice].copy_(restore_tensor)
 
 
 class ActivationMasker:
