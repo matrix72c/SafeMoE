@@ -4,7 +4,7 @@ devices: auto
 num_nodes: 1
 seed: 42
 logger_name: wandb
-run_name: safemoe-qwen-warmup-wmdp
+run_name: safemoe-qwen-warmup-wmdp-v2
 precision: bf16-mixed
 log:
   project: safemoe
@@ -14,27 +14,35 @@ base_checkpoint: checkpoints/Qwen3-30B-A3B-Base
 num_harmful_experts: 8
 num_harmful_attn_heads: 0
 epsilon: 1.0e-5
-warmup_routing_loss_weight: 0.1
-warmup_harmful_mass_floor: 0.7
+warmup_routing_loss_weight: 0.2
+warmup_harmful_mass_floor: 0.4
 warmup_std_mass_ceiling: 0.1
 
 train:
   micro_batch_size: 1
   global_batch_size: 16
-  save_interval: 200
+  save_interval: 100
   log_interval: 20
-  max_tokens: 20971520
-  max_steps: 5000
-  max_seq_length: 1024
+  max_tokens: 1000000000
+  max_seq_length: 4096
   max_norm: 1.0
-  min_lr: 4.0e-05
-  lr_warmup_steps: 200
+  min_lr: 1.0e-06
+  lr_warmup_steps: 100
 
 eval:
   interval: 100
   max_iters: 50
   initial_validation: true
   final_validation: true
+
+optimizer:
+  class_path: torch.optim.AdamW
+  init_args:
+    lr: 1.0e-05
+    weight_decay: 0.01
+    betas:
+      - 0.9
+      - 0.95
 
 data:
   class_path: litgpt.data.SafeData
@@ -72,6 +80,6 @@ data:
         unlabel_weight: 0.0
         prepare_mode: in_memory
 
-upsample_std: 1.0
+upsample_std: 4.0
 upsample_harmful: 1.0
 upsample_unlabeled: 0.0
