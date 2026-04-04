@@ -835,6 +835,13 @@ class SafeMoELayer(LLaMAMoE):
         self._last_indices: Optional[torch.Tensor] = None
         self._last_harmful_routing_mass: Optional[torch.Tensor] = None
 
+    def reset_parameters(self) -> None:
+        self._harmful_lookup.zero_()
+        if self._harmful_indices:
+            self._harmful_lookup[self._harmful_indices] = True
+        self._last_indices = None
+        self._last_harmful_routing_mass = None
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.size()
         residual_x = x
