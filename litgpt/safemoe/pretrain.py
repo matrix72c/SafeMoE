@@ -53,6 +53,7 @@ from litgpt.utils import (
     get_default_supported_precision,
     init_out_dir,
     instantiate_torch_optimizer,
+    lazy_load,
     num_parameters,
     parse_devices,
     reset_parameters,
@@ -360,6 +361,25 @@ def _reduce_scalar_mean(fabric: L.Fabric, value: Union[torch.Tensor, float]) -> 
     return value
 
 
+def _choose_split_label_once(fabric: L.Fabric, active_labels: list[str], weights: list[float]) -> str:
+    if not active_labels:
+        raise ValueError("Expected at least one active split label.")
+    split_index = 0
+    if fabric.global_rank == 0:
+        split_index = active_labels.index(random.choices(active_labels, weights=weights, k=1)[0])
+    split_index = int(fabric.broadcast(split_index, src=0))
+    return active_labels[split_index]
+
+
+def _distributed_eval_step_budget(fabric: L.Fabric, val_dataloader: DataLoader, max_iters: int) -> int:
+    local_budget = min(len(val_dataloader), max_iters)
+    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+        return local_budget
+    budget_tensor = torch.tensor(local_budget, device=fabric.device, dtype=torch.long)
+    torch.distributed.all_reduce(budget_tensor, op=torch.distributed.ReduceOp.MIN)
+    return int(budget_tensor.item())
+
+
 @torch.no_grad()
 def _evaluate_validation_split(
     fabric: L.Fabric,
@@ -375,6 +395,7 @@ def _evaluate_validation_split(
     was_training = model.training
     model.eval()
 
+    eval_step_budget = _distributed_eval_step_budget(fabric, val_dataloader, max_iters)
     prev_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
     total_loss = 0.0
@@ -385,7 +406,7 @@ def _evaluate_validation_split(
     harmful_expert_indices = list(getattr(unwrapped_model.config, "harmful_expert_indices", []))
     try:
         for k, batch in enumerate(val_dataloader):
-            if k >= max_iters:
+            if k >= eval_step_budget:
                 break
             input_ids = batch[:, 0 : model.max_seq_length].contiguous().long().to(fabric.device)
             targets = batch[:, 1 : (model.max_seq_length + 1)].contiguous().long().to(fabric.device)
@@ -750,6 +771,7 @@ def main(
     resume = find_resume_path(resume, out_dir)
     if resume:
         fabric.print(f"Resuming training from {resume}")
+        _validate_resume_checkpoint(resume)
         fabric.load(resume, state)
         _restore_rng_state(state)
 
@@ -914,8 +936,8 @@ def fit(
     while state["step_count"] < max_steps:
         iter_t0 = time.perf_counter()
 
-        # SGTM: sample split label once per optimizer step (Pattern 1)
-        split_label = random.choices(active_labels, weights=weights, k=1)[0]
+        # SGTM: sample split label once per optimizer step and share it across ranks.
+        split_label = _choose_split_label_once(fabric, active_labels, weights)
 
         # SGTM: LR update for the shared optimizer
         base_lr = optimizer.defaults["lr"]
@@ -1052,6 +1074,7 @@ def fit(
                 state,
                 tokenizer_dir,
                 checkpoint_dir / "lit_model.pth",
+                include_optimizer=False,
             )
             # SGTM EVAL-03: mid-training ablation evaluation at each checkpoint
             if registry is not None:
@@ -1197,6 +1220,16 @@ def _checkpoint_state_for_save(state, include_optimizer: bool):
         _ensure_optimizer_state_coverage(state["optimizer"])
         return state
     return {k: v for k, v in state.items() if k != "optimizer"}
+
+
+def _validate_resume_checkpoint(checkpoint_path: Path) -> None:
+    checkpoint_state = lazy_load(checkpoint_path)
+    if "optimizer" in checkpoint_state:
+        return
+    raise ValueError(
+        "Cannot resume SafeMoE training from a checkpoint without optimizer state: "
+        f"{checkpoint_path}. Periodic step-* checkpoints are model-only; resume from a full checkpoint such as out_dir/final instead."
+    )
 
 
 def _ensure_optimizer_state_coverage(optimizer) -> None:

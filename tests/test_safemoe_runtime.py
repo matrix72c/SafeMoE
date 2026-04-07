@@ -19,8 +19,12 @@ from litgpt.safemoe.masking import (
 from litgpt.safemoe.pretrain import (
     SplitValidationResult,
     ValidationSummary,
+    _choose_split_label_once,
     _collect_cached_routing_counts,
+    _distributed_eval_step_budget,
+    _evaluate_validation_split,
     _setup_split_dataloaders,
+    _validate_resume_checkpoint,
     collect_validation_summary,
     collect_warmup_routing_mass,
     evaluate_with_ablation,
@@ -165,6 +169,99 @@ def test_collect_cached_routing_counts_is_tensor_native():
     assert harmful == 4
 
 
+def test_choose_split_label_once_uses_rank_zero_sample():
+    fabric = mock.Mock(global_rank=0)
+    fabric.broadcast.side_effect = lambda value, src=0: value
+
+    with mock.patch("litgpt.safemoe.pretrain.random.choices", return_value=["D_harmful"]) as random_choices:
+        split_label = _choose_split_label_once(fabric, ["D_std", "D_harmful"], [1.0, 3.0])
+
+    assert split_label == "D_harmful"
+    random_choices.assert_called_once_with(["D_std", "D_harmful"], weights=[1.0, 3.0], k=1)
+    fabric.broadcast.assert_called_once_with(1, src=0)
+
+
+def test_choose_split_label_once_uses_broadcast_value_on_nonzero_rank():
+    fabric = mock.Mock(global_rank=1)
+    fabric.broadcast.return_value = 0
+
+    with mock.patch("litgpt.safemoe.pretrain.random.choices") as random_choices:
+        split_label = _choose_split_label_once(fabric, ["D_std", "D_harmful"], [1.0, 3.0])
+
+    assert split_label == "D_std"
+    random_choices.assert_not_called()
+    fabric.broadcast.assert_called_once_with(0, src=0)
+
+
+def test_distributed_eval_step_budget_uses_global_minimum():
+    fabric = mock.Mock(device=torch.device("cpu"))
+    dataloader = mock.Mock()
+    dataloader.__len__ = mock.Mock(return_value=7)
+
+    with mock.patch("torch.distributed.is_available", return_value=True), mock.patch(
+        "torch.distributed.is_initialized", return_value=True
+    ), mock.patch("torch.distributed.all_reduce") as all_reduce:
+        def _reduce_to_min(tensor, op=None):
+            assert op == torch.distributed.ReduceOp.MIN
+            tensor.fill_(3)
+
+        all_reduce.side_effect = _reduce_to_min
+        budget = _distributed_eval_step_budget(fabric, dataloader, max_iters=5)
+
+    assert budget == 3
+
+
+def test_evaluate_validation_split_uses_safe_eval_budget():
+    class _EvalModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.max_seq_length = 3
+            self.config = SimpleNamespace(harmful_expert_indices=[])
+            self._outputs = [torch.randn(1, 3, 8), torch.randn(1, 3, 8)]
+            self.forward_calls = 0
+
+        def forward(self, input_ids):
+            output = self._outputs[self.forward_calls]
+            self.forward_calls += 1
+            return output
+
+    fabric = mock.Mock(device=torch.device("cpu"))
+    fabric.barrier = mock.Mock()
+    fabric.print = mock.Mock()
+    model = _EvalModel()
+    model.train(True)
+
+    batches = [
+        torch.tensor([[1, 2, 3, 4]]),
+        torch.tensor([[2, 3, 4, 5]]),
+        torch.tensor([[3, 4, 5, 6]]),
+    ]
+
+    with mock.patch("litgpt.safemoe.pretrain._distributed_eval_step_budget", return_value=2), mock.patch(
+        "litgpt.safemoe.pretrain._collect_cached_routing_counts", return_value=(4, 1)
+    ), mock.patch("litgpt.safemoe.pretrain.chunked_cross_entropy", side_effect=[torch.tensor(1.0), torch.tensor(3.0)]), mock.patch(
+        "litgpt.safemoe.pretrain._reduce_validation_totals", side_effect=lambda fabric, total_loss, count: (torch.tensor(total_loss), count)
+    ), mock.patch(
+        "litgpt.safemoe.pretrain._reduce_routing_counts", side_effect=lambda fabric, total_dispatches, harmful_dispatches: (total_dispatches, harmful_dispatches)
+    ):
+        result = _evaluate_validation_split(
+            fabric=fabric,
+            model=model,
+            val_dataloader=batches,
+            split_name="D_std",
+            max_iters=5,
+            verbose=False,
+        )
+
+    assert result.batches_evaluated == 2
+    assert result.loss.item() == pytest.approx(2.0)
+    assert result.dispatch_count == 8
+    assert result.harmful_dispatches == 2
+    assert result.routing_harmful_frac == pytest.approx(0.25)
+    assert model.forward_calls == 2
+    assert model.training is True
+
+
 def test_collect_validation_summary_metric_keys():
     fabric = Fabric(accelerator="cpu", devices=1)
     split_results = [
@@ -222,6 +319,9 @@ def test_evaluate_with_ablation_restores_weights_and_logs_metrics():
     fabric.print = mock.Mock()
 
     def _check_ablation(*args, **kwargs):
+        assert kwargs["max_iters"] == 3
+        assert kwargs["metric_prefix"] == "ablated_"
+        assert kwargs["verbose"] is False
         assert all(torch.count_nonzero(param) == 0 for param in harmful_params)
         for row_slice in qkv_slices:
             assert torch.count_nonzero(qkv_param[row_slice]) == 0
@@ -243,6 +343,25 @@ def test_evaluate_with_ablation_restores_weights_and_logs_metrics():
         torch.testing.assert_close(param, before)
     torch.testing.assert_close(qkv_param, qkv_before)
     fabric.log_dict.assert_called_once_with(summary.scalar_metrics, step=7)
+
+
+def test_validate_resume_checkpoint_rejects_model_only_checkpoint(tmp_path):
+    checkpoint_path = tmp_path / "step-00000001" / "lit_model.pth"
+    checkpoint_path.parent.mkdir(parents=True)
+    torch.save({"model": {"weights": torch.tensor([1.0])}}, checkpoint_path)
+
+    with pytest.raises(ValueError, match="without optimizer state"):
+        _validate_resume_checkpoint(checkpoint_path)
+
+
+
+def test_validate_resume_checkpoint_allows_full_checkpoint(tmp_path):
+    checkpoint_path = tmp_path / "final" / "lit_model.pth"
+    checkpoint_path.parent.mkdir(parents=True)
+    torch.save({"model": {"weights": torch.tensor([1.0])}, "optimizer": {"state": {}, "param_groups": []}}, checkpoint_path)
+
+    _validate_resume_checkpoint(checkpoint_path)
+
 
 
 def test_safemoe_layer_matches_llamamoe_without_masking():
