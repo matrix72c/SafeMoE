@@ -372,7 +372,11 @@ def _choose_split_label_once(fabric: L.Fabric, active_labels: list[str], weights
 
 
 def _distributed_eval_step_budget(fabric: L.Fabric, val_dataloader: DataLoader, max_iters: int) -> int:
-    local_budget = min(len(val_dataloader), max_iters)
+    try:
+        loader_len = len(val_dataloader)
+    except (TypeError, NotImplementedError):
+        loader_len = None
+    local_budget = max_iters if loader_len is None else min(loader_len, max_iters)
     if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
         return local_budget
     budget_tensor = torch.tensor(local_budget, device=fabric.device, dtype=torch.long)

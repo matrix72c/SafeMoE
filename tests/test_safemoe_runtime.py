@@ -211,6 +211,21 @@ def test_distributed_eval_step_budget_uses_global_minimum():
     assert budget == 3
 
 
+def test_distributed_eval_step_budget_falls_back_to_max_iters_for_unsized_loader():
+    fabric = mock.Mock(device=torch.device("cpu"))
+
+    class _UnsizedLoader:
+        def __len__(self):
+            raise TypeError("length unavailable")
+
+    with mock.patch("torch.distributed.is_available", return_value=False), mock.patch(
+        "torch.distributed.is_initialized", return_value=False
+    ):
+        budget = _distributed_eval_step_budget(fabric, _UnsizedLoader(), max_iters=5)
+
+    assert budget == 5
+
+
 def test_evaluate_validation_split_uses_safe_eval_budget():
     class _EvalModel(torch.nn.Module):
         def __init__(self):
