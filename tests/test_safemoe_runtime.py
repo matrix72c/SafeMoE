@@ -394,6 +394,36 @@ def test_safedata_val_dataloaders_are_streaming_loaders(tmp_path):
     assert streaming_dataloader.call_count == 2
 
 
+def test_safedata_build_val_datasets_combines_all_validation_streams(tmp_path):
+    data = SafeData(
+        cache_dir=tmp_path,
+        datasets={
+            "std_a": {"role": "std"},
+            "std_b": {"role": "std"},
+            "harm_a": {"role": "harmful"},
+            "harm_b": {"role": "harmful"},
+        },
+    )
+    combined_std = object()
+    combined_harm = object()
+
+    with mock.patch.object(data, "_val_dir") as val_dir, mock.patch.object(
+        data,
+        "_streaming_dataset",
+        side_effect=[mock.sentinel.std_a, mock.sentinel.std_b, mock.sentinel.harm_a, mock.sentinel.harm_b],
+    ), mock.patch.object(data, "_combine_datasets", side_effect=[combined_std, combined_harm]) as combine_datasets:
+        val_dir.return_value.exists.return_value = True
+        result = data._build_val_datasets()
+
+    assert result == {"D_std": combined_std, "D_harmful": combined_harm}
+    combine_datasets.assert_has_calls(
+        [
+            mock.call([mock.sentinel.std_a, mock.sentinel.std_b], iterate_over_all=True),
+            mock.call([mock.sentinel.harm_a, mock.sentinel.harm_b], iterate_over_all=True),
+        ]
+    )
+
+
 def test_setup_split_dataloaders_preserves_mapping_order():
     fabric = mock.Mock()
     loaders = {"D_std": object(), "D_harmful": object()}

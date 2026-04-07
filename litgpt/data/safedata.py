@@ -96,12 +96,23 @@ class SafeData(DataModule):
             shuffle=shuffle,
         )
 
-    def _combine_datasets(self, datasets: list, weights: list[float] | None = None):
+    def _combine_datasets(
+        self,
+        datasets: list,
+        weights: list[float] | None = None,
+        *,
+        iterate_over_all: bool = False,
+    ):
         from litdata.streaming import CombinedStreamingDataset
 
         if len(datasets) == 1:
             return datasets[0]
-        return CombinedStreamingDataset(datasets=datasets, seed=self.seed, weights=weights, iterate_over_all=False)
+        return CombinedStreamingDataset(
+            datasets=datasets,
+            seed=self.seed,
+            weights=weights,
+            iterate_over_all=iterate_over_all,
+        )
 
     def _streaming_dataloader(self, dataset, *, num_workers: int, drop_last: bool, batch_size: int | None = None):
         from litdata.streaming import StreamingDataLoader
@@ -233,7 +244,7 @@ class SafeData(DataModule):
                 if val_dir.exists():
                     datasets.append(self._streaming_dataset(val_dir, shuffle=False))
             if datasets:
-                val_datasets[split_name] = self._combine_datasets(datasets)
+                val_datasets[split_name] = self._combine_datasets(datasets, iterate_over_all=True)
         return val_datasets
 
     def _build_val_dataloaders(self, *, batch_size: int | None = None, drop_last: bool = False) -> dict[str, object]:
