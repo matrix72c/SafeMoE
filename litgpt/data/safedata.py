@@ -251,14 +251,42 @@ class SafeData(DataModule):
         effective_batch_size = self.batch_size if batch_size is None else batch_size
         if effective_batch_size is None or effective_batch_size <= 0:
             effective_batch_size = 1
-        num_workers = self._effective_num_workers(loader_count=max(len(self.val_datasets()), 1))
+
+        class _DatasetBatchIterable:
+            def __init__(self, dataset: object, batch_size: int, drop_last: bool = False) -> None:
+                self.dataset = dataset
+                self.batch_size = batch_size
+                self.drop_last = drop_last
+
+            def __iter__(self):
+                batch = None
+                batch_fill = 0
+                for sample in self.dataset:
+                    sample = sample.clone()
+                    if batch is None:
+                        batch = sample.new_empty((self.batch_size, *sample.shape))
+                    batch[batch_fill].copy_(sample)
+                    batch_fill += 1
+                    if batch_fill == self.batch_size:
+                        yield batch
+                        batch = None
+                        batch_fill = 0
+                if batch is not None and batch_fill and not self.drop_last:
+                    yield batch[:batch_fill]
+
+            def __len__(self) -> int:
+                try:
+                    dataset_length = len(self.dataset)
+                except TypeError as ex:
+                    raise TypeError("Validation iterable length is unavailable for this dataset") from ex
+                if dataset_length is None:
+                    raise TypeError("Validation iterable length is unavailable for this dataset")
+                if self.drop_last:
+                    return dataset_length // self.batch_size
+                return (dataset_length + self.batch_size - 1) // self.batch_size
+
         return {
-            split_name: self._streaming_dataloader(
-                dataset,
-                num_workers=num_workers,
-                drop_last=drop_last,
-                batch_size=effective_batch_size,
-            )
+            split_name: _DatasetBatchIterable(dataset, batch_size=effective_batch_size, drop_last=drop_last)
             for split_name, dataset in self.val_datasets().items()
         }
 

@@ -5,7 +5,6 @@ from unittest import mock
 import pytest
 import torch
 from lightning import Fabric
-from litdata.streaming import StreamingDataLoader
 
 from litgpt.config import Config
 from litgpt.data.safedata import SafeData
@@ -393,20 +392,31 @@ def test_safemoe_layer_matches_llamamoe_without_masking():
     torch.testing.assert_close(safemoe_out, baseline_out)
 
 
-def test_safedata_val_dataloaders_are_streaming_loaders(tmp_path):
+def test_safedata_val_dataloaders_are_split_aware_iterables(tmp_path):
     data = SafeData(cache_dir=tmp_path, datasets={})
     data.connect(batch_size=2, max_seq_length=4)
-    fake_dataset = object()
-    fake_loader = mock.MagicMock(spec=StreamingDataLoader)
+    std_dataset = [torch.tensor([1, 2, 3]), torch.tensor([4, 5, 6]), torch.tensor([7, 8, 9])]
+    harm_dataset = [torch.tensor([10, 11, 12])]
 
-    with mock.patch.object(data, "val_datasets", return_value={"D_std": fake_dataset, "D_harmful": fake_dataset}), mock.patch.object(
-        data, "_effective_num_workers", return_value=0
-    ), mock.patch.object(data, "_streaming_dataloader", return_value=fake_loader) as streaming_dataloader:
+    with mock.patch.object(data, "val_datasets", return_value={"D_std": std_dataset, "D_harmful": harm_dataset}):
         loaders = data.val_dataloaders()
 
     assert set(loaders) == {"D_std", "D_harmful"}
-    assert all(loader is fake_loader for loader in loaders.values())
-    assert streaming_dataloader.call_count == 2
+
+    std_batches = list(loaders["D_std"])
+    harm_batches = list(loaders["D_harmful"])
+
+    assert len(std_batches) == 2
+    assert std_batches[0].shape == (2, 3)
+    assert std_batches[1].shape == (1, 3)
+    torch.testing.assert_close(std_batches[0], torch.tensor([[1, 2, 3], [4, 5, 6]]))
+    torch.testing.assert_close(std_batches[1], torch.tensor([[7, 8, 9]]))
+
+    assert len(harm_batches) == 1
+    assert harm_batches[0].shape == (1, 3)
+    torch.testing.assert_close(harm_batches[0], torch.tensor([[10, 11, 12]]))
+    assert len(loaders["D_std"]) == 2
+    assert len(loaders["D_harmful"]) == 1
 
 
 def test_safedata_build_val_datasets_combines_all_validation_streams(tmp_path):
@@ -439,9 +449,23 @@ def test_safedata_build_val_datasets_combines_all_validation_streams(tmp_path):
     )
 
 
-def test_setup_split_dataloaders_preserves_mapping_order():
+def test_setup_split_dataloaders_returns_non_dataloader_iterables_unchanged():
     fabric = mock.Mock()
     loaders = {"D_std": object(), "D_harmful": object()}
+
+    result = _setup_split_dataloaders(fabric, loaders)
+
+    assert result == loaders
+    fabric.setup_dataloaders.assert_not_called()
+
+
+def test_setup_split_dataloaders_preserves_mapping_order_for_dataloaders():
+    fabric = mock.Mock()
+    dataset = [torch.tensor([1, 2, 3]), torch.tensor([4, 5, 6])]
+    loaders = {
+        "D_std": torch.utils.data.DataLoader(dataset, batch_size=1),
+        "D_harmful": torch.utils.data.DataLoader(dataset, batch_size=1),
+    }
     prepared = (mock.sentinel.std_loader, mock.sentinel.harm_loader)
     fabric.setup_dataloaders.return_value = prepared
 

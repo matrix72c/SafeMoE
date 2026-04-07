@@ -264,10 +264,12 @@ def _setup_split_dataloaders(
 ) -> dict[str, DataLoader]:
     if not loaders:
         return {}
-    prepared_loaders = fabric.setup_dataloaders(*loaders.values())
-    if len(loaders) == 1:
-        prepared_loaders = (prepared_loaders,)
-    return dict(zip(loaders.keys(), prepared_loaders))
+    if all(isinstance(loader, DataLoader) for loader in loaders.values()):
+        prepared_loaders = fabric.setup_dataloaders(*loaders.values())
+        if len(loaders) == 1:
+            prepared_loaders = (prepared_loaders,)
+        return dict(zip(loaders.keys(), prepared_loaders))
+    return dict(loaders)
 
 
 def _build_optimizer(
