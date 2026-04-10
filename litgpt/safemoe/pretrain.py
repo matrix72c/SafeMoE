@@ -20,7 +20,6 @@ import torch.nn.functional as F
 import yaml
 from lightning.fabric.strategies import FSDPStrategy
 from lightning.fabric.utilities.throughput import ThroughputMonitor, measure_flops
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.utils.data import DataLoader
 from typing_extensions import Literal
 
@@ -64,41 +63,33 @@ from litgpt.utils import (
 SPLIT_LABELS = ["D_std", "D_harmful", "D_unlabeled"]
 
 
-class WarmupSurgeryArgs(NamedTuple):
-    base_checkpoint: Path
-    num_harmful_experts: int
-    num_harmful_attn_heads: int
-    seed: int
-    epsilon: float
-
-
 def resolve_out_dir(out_dir: Optional[Path], run_name: Optional[str] = None) -> Path:
     if out_dir is not None:
         return init_out_dir(out_dir)
     if run_name:
         return init_out_dir(Path("checkpoints") / run_name)
-    config_path = _config_path_from_argv(sys.argv[1:])
-    if config_path is not None:
-        return init_out_dir(Path("checkpoints") / config_path.stem)
-    return init_out_dir(Path("out/pretrain"))
 
-
-def _config_path_from_argv(argv: List[str]) -> Optional[Path]:
     expanded_args: list[str] = []
-    for arg in argv:
+    for arg in sys.argv[1:]:
         if arg.startswith("@") and len(arg) > 1:
             expanded_args.extend(shlex.split(Path(arg[1:]).read_text()))
         else:
             expanded_args.append(arg)
 
+    config_path = None
     for index, arg in enumerate(expanded_args):
         if arg in {"--config", "-c"} and index + 1 < len(expanded_args):
-            return Path(expanded_args[index + 1])
+            config_path = Path(expanded_args[index + 1])
+            break
         if arg.startswith("--config="):
-            return Path(arg.split("=", 1)[1])
+            config_path = Path(arg.split("=", 1)[1])
+            break
         if arg.startswith("-c="):
-            return Path(arg.split("=", 1)[1])
-    return None
+            config_path = Path(arg.split("=", 1)[1])
+            break
+    if config_path is not None:
+        return init_out_dir(Path("checkpoints") / config_path.stem)
+    return init_out_dir(Path("out/pretrain"))
 
 
 def maybe_prepare_warmup_checkpoint(
@@ -107,66 +98,31 @@ def maybe_prepare_warmup_checkpoint(
     initial_checkpoint_dir: Optional[Path],
     base_checkpoint: Optional[Path],
     num_harmful_experts: Optional[int],
-    num_harmful_attn_heads: Optional[int],
     seed: int,
     epsilon: Optional[float],
 ) -> Optional[Path]:
-    if stage != "warmup":
-        if any(value is not None for value in (base_checkpoint, num_harmful_experts, num_harmful_attn_heads, epsilon)):
-            raise ValueError("Warmup auto-surgery args can only be used when `stage=warmup`.")
-        return initial_checkpoint_dir
-
-    surgery_args = _build_warmup_surgery_args(
-        initial_checkpoint_dir=initial_checkpoint_dir,
-        base_checkpoint=base_checkpoint,
-        num_harmful_experts=num_harmful_experts,
-        num_harmful_attn_heads=num_harmful_attn_heads,
-        seed=seed,
-        epsilon=epsilon,
-    )
-    if surgery_args is None:
-        return initial_checkpoint_dir
-    return surgery_setup(
-        base_checkpoint=surgery_args.base_checkpoint,
-        num_harmful_experts=surgery_args.num_harmful_experts,
-        num_harmful_attn_heads=surgery_args.num_harmful_attn_heads,
-        seed=surgery_args.seed,
-        epsilon=surgery_args.epsilon,
-    )
-
-
-def _build_warmup_surgery_args(
-    *,
-    initial_checkpoint_dir: Optional[Path],
-    base_checkpoint: Optional[Path],
-    num_harmful_experts: Optional[int],
-    num_harmful_attn_heads: Optional[int],
-    seed: int,
-    epsilon: Optional[float],
-) -> Optional[WarmupSurgeryArgs]:
-    fields = {
+    surgery_fields = {
         "base_checkpoint": base_checkpoint,
         "num_harmful_experts": num_harmful_experts,
-        "num_harmful_attn_heads": num_harmful_attn_heads,
         "epsilon": epsilon,
     }
-    if not any(value is not None for value in fields.values()):
-        return None
-    missing_fields = [name for name, value in fields.items() if value is None]
+    if stage != "warmup":
+        if any(value is not None for value in surgery_fields.values()):
+            raise ValueError("Warmup auto-surgery args can only be used when `stage=warmup`.")
+        return initial_checkpoint_dir
+    if not any(value is not None for value in surgery_fields.values()):
+        return initial_checkpoint_dir
+    missing_fields = [name for name, value in surgery_fields.items() if value is None]
     if missing_fields:
-        raise ValueError(
-            "Warmup auto-surgery requires all of "
-            "`base_checkpoint`, `num_harmful_experts`, `num_harmful_attn_heads`, and `epsilon`."
-        )
+        raise ValueError("Warmup auto-surgery requires `base_checkpoint`, `num_harmful_experts`, and `epsilon`.")
     if initial_checkpoint_dir is not None:
         raise ValueError(
             "Can't provide both `--initial_checkpoint_dir` and warmup auto-surgery args. "
-            "Use the surgery source checkpoint via `--base_checkpoint` only."
+            "Use `--base_checkpoint` only."
         )
-    return WarmupSurgeryArgs(
+    return surgery_setup(
         base_checkpoint=Path(base_checkpoint),
         num_harmful_experts=int(num_harmful_experts),
-        num_harmful_attn_heads=int(num_harmful_attn_heads),
         seed=seed,
         epsilon=float(epsilon),
     )
@@ -221,20 +177,7 @@ class ValidationSummary:
 
 
 def _unwrap_safemoe_model(model: nn.Module) -> nn.Module:
-    if hasattr(model, "module"):
-        return model.module
-    return model
-
-
-def _resolve_registry_model_view(model: nn.Module) -> nn.Module:
-    raw_model = getattr(model, "_forward_module", model)
-    if hasattr(raw_model, "module") and not isinstance(raw_model, FSDP):
-        return raw_model.module
-    return raw_model
-
-
-def _resolve_module_traversal_view(model: nn.Module) -> nn.Module:
-    return getattr(model, "module", _unwrap_safemoe_model(model))
+    return getattr(model, "module", model)
 
 
 def _setup_model(fabric: L.Fabric, config: Config, train: TrainArgs) -> GPT:
@@ -254,8 +197,6 @@ def _setup_model(fabric: L.Fabric, config: Config, train: TrainArgs) -> GPT:
     return fabric.setup(model)
 
 
-def _build_registry(model: nn.Module, config: Config) -> HarmfulParamRegistry:
-    return HarmfulParamRegistry(_resolve_registry_model_view(model), config)
 
 
 def _setup_split_dataloaders(
@@ -288,14 +229,6 @@ def _build_optimizer(
     return fabric.setup_optimizers(optimizer)
 
 
-def _build_maskers(
-    model: nn.Module,
-    registry: HarmfulParamRegistry,
-) -> tuple[GradientMasker, ActivationMasker]:
-    module_view = _resolve_module_traversal_view(model)
-    return GradientMasker(registry), ActivationMasker(module_view)
-
-
 def _iter_safemoe_layers(model: nn.Module):
     yield from (
         module
@@ -323,34 +256,6 @@ def _collect_cached_routing_counts(
     return total_dispatches, harmful_dispatches
 
 
-def _reduce_routing_counts(
-    fabric: L.Fabric,
-    total_dispatches: int,
-    harmful_dispatches: int,
-) -> tuple[int, int]:
-    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
-        return total_dispatches, harmful_dispatches
-    dispatch_tensor = torch.tensor(total_dispatches, device=fabric.device, dtype=torch.long)
-    harmful_tensor = torch.tensor(harmful_dispatches, device=fabric.device, dtype=torch.long)
-    torch.distributed.all_reduce(dispatch_tensor)
-    torch.distributed.all_reduce(harmful_tensor)
-    return int(dispatch_tensor.item()), int(harmful_tensor.item())
-
-
-def _reduce_validation_totals(
-    fabric: L.Fabric,
-    total_loss: float,
-    count: int,
-) -> tuple[torch.Tensor, int]:
-    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
-        return torch.tensor(total_loss, device=fabric.device), count
-    loss_tensor = torch.tensor(total_loss, device=fabric.device, dtype=torch.float32)
-    count_tensor = torch.tensor(count, device=fabric.device, dtype=torch.long)
-    torch.distributed.all_reduce(loss_tensor)
-    torch.distributed.all_reduce(count_tensor)
-    return loss_tensor, int(count_tensor.item())
-
-
 def _reduce_scalar_mean(fabric: L.Fabric, value: Union[torch.Tensor, float]) -> torch.Tensor:
     if not isinstance(value, torch.Tensor):
         value = torch.tensor(value, device=fabric.device, dtype=torch.float32)
@@ -373,19 +278,6 @@ def _choose_split_label_once(fabric: L.Fabric, active_labels: list[str], weights
     return active_labels[split_index]
 
 
-def _distributed_eval_step_budget(fabric: L.Fabric, val_dataloader: DataLoader, max_iters: int) -> int:
-    try:
-        loader_len = len(val_dataloader)
-    except (TypeError, NotImplementedError):
-        loader_len = None
-    local_budget = max_iters if loader_len is None else min(loader_len, max_iters)
-    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
-        return local_budget
-    budget_tensor = torch.tensor(local_budget, device=fabric.device, dtype=torch.long)
-    torch.distributed.all_reduce(budget_tensor, op=torch.distributed.ReduceOp.MIN)
-    return int(budget_tensor.item())
-
-
 @torch.no_grad()
 def _evaluate_validation_split(
     fabric: L.Fabric,
@@ -401,7 +293,16 @@ def _evaluate_validation_split(
     was_training = model.training
     model.eval()
 
-    eval_step_budget = _distributed_eval_step_budget(fabric, val_dataloader, max_iters)
+    try:
+        loader_len = len(val_dataloader)
+    except (TypeError, NotImplementedError):
+        loader_len = None
+    eval_step_budget = max_iters if loader_len is None else min(loader_len, max_iters)
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        budget_tensor = torch.tensor(eval_step_budget, device=fabric.device, dtype=torch.long)
+        torch.distributed.all_reduce(budget_tensor, op=torch.distributed.ReduceOp.MIN)
+        eval_step_budget = int(budget_tensor.item())
+
     prev_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
     total_loss = 0.0
@@ -431,13 +332,19 @@ def _evaluate_validation_split(
         model.train(was_training)
         fabric.barrier()
 
-    total_loss_tensor, total_count = _reduce_validation_totals(fabric, total_loss=total_loss, count=count)
-    val_loss = total_loss_tensor / max(total_count, 1)
-    total_dispatches, harmful_dispatches = _reduce_routing_counts(
-        fabric,
-        total_dispatches=total_dispatches,
-        harmful_dispatches=harmful_dispatches,
-    )
+    loss_tensor = torch.tensor(total_loss, device=fabric.device, dtype=torch.float32)
+    count_tensor = torch.tensor(count, device=fabric.device, dtype=torch.long)
+    dispatch_tensor = torch.tensor(total_dispatches, device=fabric.device, dtype=torch.long)
+    harmful_tensor = torch.tensor(harmful_dispatches, device=fabric.device, dtype=torch.long)
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.all_reduce(loss_tensor)
+        torch.distributed.all_reduce(count_tensor)
+        torch.distributed.all_reduce(dispatch_tensor)
+        torch.distributed.all_reduce(harmful_tensor)
+    total_count = int(count_tensor.item())
+    val_loss = loss_tensor / max(total_count, 1)
+    total_dispatches = int(dispatch_tensor.item())
+    harmful_dispatches = int(harmful_tensor.item())
     routing_harmful_frac = harmful_dispatches / max(total_dispatches, 1)
     return SplitValidationResult(
         loss=val_loss,
@@ -483,7 +390,9 @@ def collect_validation_summary(
     return ValidationSummary(by_split=by_split, scalar_metrics=scalar_metrics, routing_margin=routing_margin)
 
 
-def _format_validation_status(summary: ValidationSummary) -> str:
+
+
+def _validation_status(summary: ValidationSummary) -> str:
     if not summary.by_split:
         return "n/a"
     return ", ".join(
@@ -514,24 +423,8 @@ def _restore_rng_state(state: dict[str, object]) -> None:
         torch.cuda.set_rng_state_all(torch_cuda_rng_state_all)
 
 
-def ensure_config(config: Union[Config, Config]) -> Config:
-    if isinstance(config, Config):
-        return config
-    return Config(**asdict(config))
-
-
-def load_config_from_checkpoint(ckpt_dir: Path) -> Config:
-    raw = yaml.safe_load((ckpt_dir / "model_config.yaml").read_text())
-    return Config(**{key: value for key, value in raw.items() if not isinstance(value, dict)})
-
-
-# ---------------------------------------------------------------------------
-# setup() — SGTM entry point
-# ---------------------------------------------------------------------------
-
 def setup(
     model_name: str,
-    # SGTM: Config instead of litgpt.Config
     model_config: Optional[Config] = None,
     out_dir: Optional[Path] = None,
     run_name: Optional[str] = None,
@@ -558,7 +451,6 @@ def setup(
     tokenizer_dir: Optional[Path] = None,
     logger_name: LoggerChoice = "wandb",
     seed: int = 42,
-    # SGTM: upsample weights for 3-path split sampling — required, no defaults
     upsample_std: Optional[float] = None,
     upsample_harmful: Optional[float] = None,
     upsample_unlabeled: Optional[float] = None,
@@ -568,10 +460,9 @@ def setup(
     warmup_std_mass_ceiling: float = 0.4,
     base_checkpoint: Optional[Path] = None,
     num_harmful_experts: Optional[int] = None,
-    num_harmful_attn_heads: Optional[int] = None,
     epsilon: Optional[float] = None,
 ):
-    """Pretrain a SafeMoE model with SGTM single-optimizer 3-path training loop.
+    """Pretrain a SafeMoE model with split-aware masking and validation.
 
     Arguments:
         model_name: The name of the model to pretrain. Choose from names in ``litgpt.config``. Use "list" to list the supported models.
@@ -599,10 +490,8 @@ def setup(
             ``"transfer"`` runs the full SGTM objective. Warmup may still sample D_unlabeled when configured.
         base_checkpoint: Base checkpoint used to derive a warmup surgery checkpoint.
         num_harmful_experts: Count of harmful experts for warmup auto-surgery.
-        num_harmful_attn_heads: Count of harmful attention heads for warmup auto-surgery.
         epsilon: Noise scale for warmup auto-surgery.
     """
-    # SGTM: validate required upsample weights — no silent defaults
     if any(w is None for w in [upsample_std, upsample_harmful, upsample_unlabeled]):
         raise ValueError(
             "upsample_std/harmful/unlabeled are required fields — no defaults"
@@ -623,7 +512,6 @@ def setup(
         initial_checkpoint_dir=initial_checkpoint_dir,
         base_checkpoint=base_checkpoint,
         num_harmful_experts=num_harmful_experts,
-        num_harmful_attn_heads=num_harmful_attn_heads,
         seed=seed,
         epsilon=epsilon,
     )
@@ -644,9 +532,14 @@ def setup(
     if data is None:
         raise ValueError("data (SafeData) is required for SGTM training")
 
-    config = ensure_config(model_config)
+    if isinstance(model_config, Config):
+        config = model_config
+    else:
+        config = Config(**asdict(model_config))
     if initial_checkpoint_dir is not None:
-        config = load_config_from_checkpoint(initial_checkpoint_dir)
+        raw = yaml.safe_load((initial_checkpoint_dir / "model_config.yaml").read_text())
+        config = Config(**{key: value for key, value in raw.items() if not isinstance(value, dict)})
+        hparams["model_config"] = asdict(config)
     precision = precision or get_default_supported_precision(training=True)
     devices = parse_devices(devices)
     out_dir = resolve_out_dir(out_dir, run_name=run_name)
@@ -718,10 +611,6 @@ def setup(
     )
 
 
-# ---------------------------------------------------------------------------
-# main() — SGTM: single optimizer + HarmfulParamRegistry + masker instantiation
-# ---------------------------------------------------------------------------
-
 def main(
     fabric: L.Fabric,
     devices: int,
@@ -754,19 +643,16 @@ def main(
 
     model = _setup_model(fabric, config, train)
 
-    # SGTM: REMOVED torch.compile(model) — incompatible with Python bool flag checks
-    # (per RESEARCH.md anti-pattern: torch.compile traces through Python booleans, making
-    # dynamic _activation_masking_enabled flag checks ineffective)
-    registry = _build_registry(model, config)
-    optimizer = _build_optimizer(fabric, optimizer, registry)
-
-    data_loaders = initialize_data_loaders(data, tokenizer, train, model.max_seq_length)
+    data.connect(tokenizer=tokenizer, batch_size=train.micro_batch_size, max_seq_length=model.max_seq_length)
+    data_loaders = data.initialize_loaders()
     val_loaders_for_eval = _setup_split_dataloaders(fabric, data_loaders["val_loaders"])
 
     if initial_checkpoint_dir:
         fabric.load_raw(initial_checkpoint_dir / "lit_model.pth", model)
 
-    # SGTM: state dict with a single optimizer covering harmful/std/shared params
+    registry = HarmfulParamRegistry(_unwrap_safemoe_model(model), config)
+    optimizer = _build_optimizer(fabric, optimizer, registry)
+
     state = {
         "model": model,
         "optimizer": optimizer,
@@ -777,11 +663,17 @@ def main(
     resume = find_resume_path(resume, out_dir)
     if resume:
         fabric.print(f"Resuming training from {resume}")
-        _validate_resume_checkpoint(resume)
+        checkpoint_state = lazy_load(resume)
+        if "optimizer" not in checkpoint_state:
+            raise ValueError(
+                "Cannot resume SafeMoE training from a checkpoint without optimizer state: "
+                f"{resume}. Periodic step-* checkpoints are model-only; resume from a full checkpoint such as out_dir/final instead."
+            )
         fabric.load(resume, state)
         _restore_rng_state(state)
 
-    gradient_masker, activation_masker = _build_maskers(model, registry)
+    gradient_masker = GradientMasker(registry)
+    activation_masker = ActivationMasker(_unwrap_safemoe_model(model))
 
     train_time = time.perf_counter()
 
@@ -847,10 +739,6 @@ def main(
     fabric.print(separator)
 
 
-# ---------------------------------------------------------------------------
-# fit() — SGTM: 3-path accumulation loop with split iterators
-# ---------------------------------------------------------------------------
-
 def fit(
     fabric: L.Fabric,
     devices: int,
@@ -861,14 +749,11 @@ def fit(
     train: TrainArgs,
     eval: EvalArgs,
     num_nodes: int = 1,
-    # SGTM: maskers for 3-path gradient and activation isolation
     gradient_masker: Optional[GradientMasker] = None,
     activation_masker: Optional[ActivationMasker] = None,
-    # SGTM: upsample weights for split sampling
     upsample_std: float = 1.0,
     upsample_harmful: float = 1.0,
     upsample_unlabeled: float = 1.0,
-    # SGTM: EVAL-03 — mid-training ablation evaluation
     registry: Optional["HarmfulParamRegistry"] = None,
     val_loaders: Optional[dict[str, DataLoader]] = None,
     stage: Literal["transfer", "warmup"] = "transfer",
@@ -885,16 +770,16 @@ def fit(
     if eval.initial_validation:
         initial_summary = collect_validation_summary(fabric, model, val_loaders, max_iters=eval.max_iters)
         fabric.log_dict(initial_summary.scalar_metrics, step=max(state["iter_num"] - 1, 0))
-        validation_status = _format_validation_status(initial_summary)
+        validation_status = _validation_status(initial_summary)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     else:
-        fabric.print("Verifying settings ...")
         collect_validation_summary(fabric, model, val_loaders, max_iters=2, verbose=False)
         validation_status = "n/a"
 
     throughput = ThroughputMonitor(fabric, window_size=5)
 
+    measured_flops = 0
     try:
         with torch.device("meta"):
             meta_model = GPT(model.config)
@@ -905,10 +790,7 @@ def fit(
             fabric.print(f"Measured TFLOPs: {measured_flops * fabric.world_size / 1e12:.2f}")
             del meta_model, x
     except (NotImplementedError, RuntimeError):
-        # MoE models use torch.where() which is not supported on meta device.
-        # Fall back to zero so ThroughputMonitor still works (it uses flops if non-zero).
-        measured_flops = 0
-        fabric.print("FLOP measurement skipped (meta device does not support MoE ops)")
+        pass
 
     tokens_per_iter = train.micro_batch_size * model.max_seq_length
     accum_iters = train.gradient_accumulation_iters(devices, num_nodes)
@@ -922,7 +804,6 @@ def fit(
     log_iter_interval = train.log_interval * accum_iters
     initial_step = state["step_count"]
 
-    # SGTM: three split iterators replace single CycleIterator (Pattern 1)
     active_labels = [l for l in list(SPLIT_LABELS) if l in data._loaders]
     split_iters = {label: CycleIterator(data.get_loader(label)) for label in active_labels}
     split_weights = {
@@ -937,24 +818,17 @@ def fit(
 
     warmup_iters = train.warmup_iters(devices, num_nodes, max_iters, data.get_loader("D_std"))
 
-    # SGTM: iter_num counts micro-batches; step_count counts optimizer steps
-    # The outer while loop drives one OPTIMIZER STEP per iteration (accum_iters micro-batches)
     while state["step_count"] < max_steps:
         iter_t0 = time.perf_counter()
 
-        # SGTM: sample split label once per optimizer step and share it across ranks.
         split_label = _choose_split_label_once(fabric, active_labels, weights)
 
-        # SGTM: LR update for the shared optimizer
         base_lr = optimizer.defaults["lr"]
         lr = get_lr(base_lr, state["iter_num"], warmup_iters, max_iters, train.min_lr)
         for pg in optimizer.param_groups:
             pg["lr"] = lr
 
-        # SGTM: 3-path masking template (Pattern 2)
-        # During warmup, D_unlabeled may still be sampled, but the auxiliary routing loss stays zero there.
-        # D_std enables activation masking before the micro-batch window and disables it in finally.
-        if split_label == "D_std":
+        if split_label == "D_std" and activation_masker is not None:
             activation_masker.enable()
 
         try:
@@ -962,7 +836,6 @@ def fit(
             routing_loss_values: list[torch.Tensor] = []
             total_loss_values: list[torch.Tensor] = []
             harmful_mass_values: list[torch.Tensor] = []
-            # SGTM: inner accumulation loop — accum_iters micro-batches per optimizer step
             for micro_batch_idx in range(accum_iters):
                 state["iter_num"] += 1
                 is_accumulating = micro_batch_idx < accum_iters - 1
@@ -976,7 +849,6 @@ def fit(
                     lm_loss = chunked_cross_entropy(logits, targets)
                     if stage == "warmup":
                         harmful_mass = collect_warmup_routing_mass(model)
-                        # Warmup may sample D_unlabeled, but only D_std and D_harmful receive routing loss.
                         routing_loss = warmup_routing_loss(
                             harmful_mass,
                             split_label,
@@ -996,12 +868,10 @@ def fit(
                 harmful_mass_values.append(harmful_mass.detach())
 
         finally:
-            # SGTM: always disable activation masker (try/finally avoids masker stuck True on error)
-            if split_label == "D_std":
+            if split_label == "D_std" and activation_masker is not None:
                 activation_masker.disable()
 
-        # SGTM: per-split masking then one optimizer step
-        if split_label != "D_unlabeled":
+        if split_label != "D_unlabeled" and gradient_masker is not None:
             gradient_masker.mask(split_label)
         fabric.clip_gradients(model, optimizer, max_norm=train.max_norm)
         optimizer.step()
@@ -1066,7 +936,7 @@ def fit(
         if state["step_count"] % eval.interval == 0:
             t0 = time.perf_counter()
             validation_summary = collect_validation_summary(fabric, model, val_loaders, max_iters=eval.max_iters)
-            validation_status = _format_validation_status(validation_summary)
+            validation_status = _validation_status(validation_summary)
             td = time.perf_counter() - t0
 
             fabric.print(f"iter {state['iter_num']}: val {validation_status}, val time: {td * 1000:.2f} ms")
@@ -1082,9 +952,8 @@ def fit(
                 checkpoint_dir / "lit_model.pth",
                 include_optimizer=False,
             )
-            # SGTM EVAL-03: mid-training ablation evaluation at each checkpoint
             if registry is not None:
-                ablated_summary = evaluate_with_ablation(
+                evaluate_with_ablation(
                     fabric,
                     model,
                     registry,
@@ -1093,16 +962,10 @@ def fit(
                     eval_args=eval,
                 )
 
-    # Final validation
     if eval.final_validation:
         final_summary = collect_validation_summary(fabric, model, val_loaders, max_iters=eval.max_iters)
         fabric.log_dict(final_summary.scalar_metrics, step=state["iter_num"])
-        fabric.print(f"Final evaluation | val { _format_validation_status(final_summary) }")
-
-
-# ---------------------------------------------------------------------------
-# evaluate_with_ablation() — EVAL-03: in-training ablation evaluation
-# ---------------------------------------------------------------------------
+        fabric.print(f"Final evaluation | val { _validation_status(final_summary) }")
 
 
 def evaluate_with_ablation(
@@ -1138,25 +1001,6 @@ def evaluate_with_ablation(
     return summary
 
 
-# ---------------------------------------------------------------------------
-# initialize_data_loaders() — SGTM: set up data module and return structured loaders
-# ---------------------------------------------------------------------------
-
-def initialize_data_loaders(
-    data: SafeData,
-    tokenizer: Optional[Tokenizer],
-    train: TrainArgs,
-    block_size: int,
-) -> dict[str, object]:
-    """Set up the data module and return structured train/val loader handles."""
-    data.connect(tokenizer=tokenizer, batch_size=train.micro_batch_size, max_seq_length=block_size)
-    return data.initialize_loaders()
-
-
-# ---------------------------------------------------------------------------
-# get_lr() — cosine LR with linear warmup (reused from litgpt)
-# ---------------------------------------------------------------------------
-
 def get_lr(learning_rate: float, it: int, warmup_iters: int, max_iters: int, min_lr: float) -> float:
     # 1) linear warmup for warmup_iters steps
     if it < warmup_iters:
@@ -1170,10 +1014,6 @@ def get_lr(learning_rate: float, it: int, warmup_iters: int, max_iters: int, min
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + coeff * (learning_rate - min_lr)
 
-
-# ---------------------------------------------------------------------------
-# initialize_weights() — GPT-NeoX weight initialization (reused from litgpt)
-# ---------------------------------------------------------------------------
 
 def initialize_weights(fabric: L.Fabric, model: GPT, n_layer: int, n_embd: int) -> None:
     """GPT-NeoX weight initialization (https://arxiv.org/abs/2204.06745)."""
@@ -1195,10 +1035,6 @@ def initialize_weights(fabric: L.Fabric, model: GPT, n_layer: int, n_embd: int) 
         reset_parameters(model)
 
 
-# ---------------------------------------------------------------------------
-# save_checkpoint() — reused from litgpt
-# ---------------------------------------------------------------------------
-
 def save_checkpoint(fabric, state, tokenizer_dir, checkpoint_file, include_optimizer: bool = True):
     model = state["model"]
     checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1207,7 +1043,11 @@ def save_checkpoint(fabric, state, tokenizer_dir, checkpoint_file, include_optim
     try:
         fabric.save(checkpoint_file, save_state)
     except AssertionError as ex:
-        if not _should_retry_fsdp_checkpoint_without_optimizer(fabric, ex, include_optimizer):
+        if (
+            not include_optimizer
+            or not isinstance(fabric.strategy, FSDPStrategy)
+            or "Manually calculated _sharded_numel_padded is incorrect" not in str(ex)
+        ):
             raise
         fabric.print(
             "FSDP optimizer-state checkpointing hit a torch assertion; retrying without optimizer state."
@@ -1228,16 +1068,6 @@ def _checkpoint_state_for_save(state, include_optimizer: bool):
     return {k: v for k, v in state.items() if k != "optimizer"}
 
 
-def _validate_resume_checkpoint(checkpoint_path: Path) -> None:
-    checkpoint_state = lazy_load(checkpoint_path)
-    if "optimizer" in checkpoint_state:
-        return
-    raise ValueError(
-        "Cannot resume SafeMoE training from a checkpoint without optimizer state: "
-        f"{checkpoint_path}. Periodic step-* checkpoints are model-only; resume from a full checkpoint such as out_dir/final instead."
-    )
-
-
 def _ensure_optimizer_state_coverage(optimizer) -> None:
     """Backfill empty optimizer-state entries for params that have never stepped.
 
@@ -1251,16 +1081,6 @@ def _ensure_optimizer_state_coverage(optimizer) -> None:
         for param in param_group["params"]:
             optimizer.state.setdefault(param, {})
 
-
-def _should_retry_fsdp_checkpoint_without_optimizer(fabric, ex: AssertionError, include_optimizer: bool) -> bool:
-    if not include_optimizer or not isinstance(fabric.strategy, FSDPStrategy):
-        return False
-    return "Manually calculated _sharded_numel_padded is incorrect" in str(ex)
-
-
-# ---------------------------------------------------------------------------
-# validate_args() — reused from litgpt
-# ---------------------------------------------------------------------------
 
 def validate_args(train: TrainArgs, eval: EvalArgs, initial_checkpoint_dir, resume) -> None:
     issues = []

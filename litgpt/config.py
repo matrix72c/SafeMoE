@@ -100,7 +100,6 @@ class Config:
     routed_scaling_factor: float = 1.0
     norm_topk_prob: bool = False
     harmful_expert_indices: list[int] = field(default_factory=list)
-    harmful_attn_heads: list[int] = field(default_factory=list)
     num_harmful_experts: int = 0
     # GPT before/after blocks
     scale_embeddings: bool = False

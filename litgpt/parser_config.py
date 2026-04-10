@@ -30,8 +30,6 @@ def parser_commands() -> List[str]:
         "evaluate",
         "serve",
         "safemoe_ablate",
-        "safemoe_evaluate",
-        "safemoe_surgery",
     ]
 
 

@@ -65,12 +65,9 @@ Current research flow:
 - Warmup with auto-surgery from a base checkpoint:
   - `litgpt pretrain_safemoe --config safemoe/configs/safemoe-qwen-warmup-tinystories.yaml`
 - Manual surgery:
-  - `litgpt safemoe_surgery --help`
 - Ablate harmful parameters in a checkpoint:
   - `litgpt safemoe_ablate <ckpt_dir>`
 - Evaluate a checkpoint, optionally against an ablated copy:
-  - `litgpt safemoe_evaluate <ckpt_dir>`
-  - `litgpt safemoe_evaluate <ckpt_dir> --ablated <ckpt_dir>/ablated`
 
 ### GPU cluster runtime
 - This repository is developed on a private cluster dev machine that shares storage with the GPU cluster.
@@ -91,7 +88,7 @@ Current research flow:
 - `litgpt/api.py` exposes the Python `LLM` API for loading checkpoints, generating text, and integrating with non-CLI workflows.
 
 ### 2. SafeMoE model integration
-- `litgpt/safemoe/config.py` defines `SafeMoEConfig`, a `litgpt.Config` subclass that adds `harmful_expert_indices`, `harmful_attn_heads`, and `num_harmful_experts`.
+- `litgpt/config.py` carries the SafeMoE fields `harmful_expert_indices` and `num_harmful_experts` directly on `Config`.
 - The key hook is `SafeMoEConfig.mlp_class`: when `mlp_class_name == "LLaMAMoE"`, LitGPT blocks instantiate `litgpt/safemoe/model.py`'s `SafeMoELayer` instead of plain `LLaMAMoE`.
 - `litgpt/safemoe/model.py` implements `SafeMoELayer`, which records routing statistics and can zero harmful expert contributions during forward passes when activation masking is enabled.
 
@@ -114,7 +111,7 @@ When modifying training code, keep this partitioning explicit and inspectable. R
 - Two stages are supported:
   - `stage: warmup`: samples from the configured training splits, including `D_unlabeled` when present, while the auxiliary routing loss only applies to `D_std` and `D_harmful` to push harmful tokens toward harmful experts and standard tokens away from them.
   - `stage: transfer`: full SGTM training over `D_std`, `D_harmful`, and `D_unlabeled`.
-- Warmup can derive a checkpoint on the fly from a base model via `base_checkpoint`, `num_harmful_experts`, `num_harmful_attn_heads`, and `epsilon`; this flows through `maybe_prepare_warmup_checkpoint()` into `litgpt.safemoe.surgery.setup()`.
+- Warmup can derive a checkpoint on the fly from a base model via `base_checkpoint`, `num_harmful_experts`, and `epsilon`; this flows through `maybe_prepare_warmup_checkpoint()` into `litgpt.safemoe.surgery.setup()`.
 - The training loop samples among dataset splits, applies activation/gradient masking as needed, logs routing metrics, and can run ablated validation by temporarily zeroing `theta_harmful`.
 
 ### 5. SafeMoE data pipeline
@@ -126,11 +123,9 @@ When modifying training code, keep this partitioning explicit and inspectable. R
 - `prepare_data()` delegates to `litgpt.data.safe_prepare.prepare_dataset` to tokenize and cache streaming-ready splits under `data/.cache/...`.
 - Training uses LitData streaming datasets/loaders rather than loading everything into memory.
 
-### 6. Surgery, ablation, and evaluation
-- `litgpt/safemoe/surgery.py` is responsible for duplicating experts / attention heads and initializing harmful-specific parameters from a base checkpoint.
+### 6. Surgery and ablation
+- `litgpt/safemoe/surgery.py` is responsible for duplicating experts and initializing harmful-specific expert parameters from a base checkpoint.
 - `litgpt/safemoe/ablate.py` builds a `HarmfulParamRegistry`, zeros all `theta_harmful` weights in a checkpoint, and writes an `ablated/` copy plus an `ablation_manifest.json`.
-- `litgpt/safemoe/evaluate.py` evaluates original and optionally ablated checkpoints; if needed, it can run surgery first when the checkpoint has no harmful experts but the hyperparameters describe how to create them.
-- `litgpt/safemoe/observability.py` contains routing observability utilities used during training/validation artifact generation.
 
 ## Important Config and Entry Files
 - `pyproject.toml`: package metadata, extras, Ruff config, and pytest defaults.

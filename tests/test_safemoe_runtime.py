@@ -6,6 +6,8 @@ import pytest
 import torch
 from lightning import Fabric
 
+import litgpt.safemoe.pretrain as safemoe_pretrain
+
 from litgpt.config import Config
 from litgpt.data.safedata import SafeData
 from litgpt.model import LLaMAMoE, SafeMoELayer
@@ -20,10 +22,8 @@ from litgpt.safemoe.pretrain import (
     ValidationSummary,
     _choose_split_label_once,
     _collect_cached_routing_counts,
-    _distributed_eval_step_budget,
     _evaluate_validation_split,
     _setup_split_dataloaders,
-    _validate_resume_checkpoint,
     collect_validation_summary,
     collect_warmup_routing_mass,
     evaluate_with_ablation,
@@ -49,7 +49,6 @@ def _make_safemoe_config(**overrides) -> Config:
         n_shared_expert=1,
         bias=False,
         harmful_expert_indices=[1, 3],
-        harmful_attn_heads=[0, 2],
     )
     for key, value in overrides.items():
         setattr(config, key, value)
@@ -71,7 +70,7 @@ def _make_registry_fixture(config: Config | None = None):
     return SimpleNamespace(config=config, model=model, layer=layer, registry=registry)
 
 
-def test_harmful_param_registry_classifies_experts_and_qkv_slices():
+def test_harmful_param_registry_classifies_experts():
     fixture = _make_registry_fixture()
     layer = fixture.layer
     registry = fixture.registry
@@ -84,15 +83,9 @@ def test_harmful_param_registry_classifies_experts_and_qkv_slices():
     assert id(layer.mlp.experts[1].fc_1.weight) in harmful_params
     assert id(layer.mlp.experts[3].proj.weight) in harmful_params
     assert id(layer.mlp.experts[0].fc_1.weight) in std_params
-    assert id(layer.attn.qkv.weight) in std_params
+    assert id(layer.attn.qkv.weight) in shared_params
     assert id(layer.mlp.gate.weight) in shared_params
     assert harmful_params | std_params | shared_params == all_params
-
-    harmful_slices = registry._qkv_harmful_metadata[0][1]
-    std_slices = registry._qkv_std_metadata[0][1]
-    assert harmful_slices
-    assert std_slices
-    assert all(isinstance(row_slice, slice) for row_slice in harmful_slices)
 
 
 @pytest.mark.parametrize(
@@ -119,7 +112,7 @@ def test_collect_warmup_routing_mass():
 
 
 def test_activation_and_gradient_maskers():
-    fixture = _make_registry_fixture(_make_safemoe_config(harmful_attn_heads=[]))
+    fixture = _make_registry_fixture()
     activation_masker = ActivationMasker(fixture.model)
     gradient_masker = GradientMasker(fixture.registry)
 
@@ -138,25 +131,19 @@ def test_activation_and_gradient_maskers():
     assert any(param.grad is not None for param in std_params)
 
 
-def test_temporarily_ablate_harmful_params_restores_qkv_and_experts():
+def test_temporarily_ablate_harmful_params_restores_experts():
     fixture = _make_registry_fixture()
     harmful_param = fixture.registry.parameters_by_type("theta_harmful")[0]
     harmful_before = harmful_param.detach().clone()
-    qkv_param = fixture.registry._qkv_harmful_metadata[0][0]
-    qkv_slices = fixture.registry._qkv_harmful_metadata[0][1]
-    qkv_before = qkv_param.detach().clone()
 
     with temporarily_ablate_harmful_params(fixture.registry):
         assert torch.count_nonzero(harmful_param) == 0
-        for row_slice in qkv_slices:
-            assert torch.count_nonzero(qkv_param[row_slice]) == 0
 
     torch.testing.assert_close(harmful_param, harmful_before)
-    torch.testing.assert_close(qkv_param, qkv_before)
 
 
 def test_collect_cached_routing_counts_is_tensor_native():
-    config = _make_safemoe_config(harmful_attn_heads=[])
+    config = _make_safemoe_config()
     model = torch.nn.Module()
     model.layers = torch.nn.ModuleList([SafeMoELayer(config), SafeMoELayer(config)])
     model.layers[0]._last_indices = torch.tensor([[0, 1], [2, 3]])
@@ -192,53 +179,21 @@ def test_choose_split_label_once_uses_broadcast_value_on_nonzero_rank():
     fabric.broadcast.assert_called_once_with(0, src=0)
 
 
-def test_distributed_eval_step_budget_uses_global_minimum():
-    fabric = mock.Mock(device=torch.device("cpu"))
-    dataloader = mock.Mock()
-    dataloader.__len__ = mock.Mock(return_value=7)
+class _EvalModel(torch.nn.Module):
+    def __init__(self, outputs=None):
+        super().__init__()
+        self.max_seq_length = 3
+        self.config = SimpleNamespace(harmful_expert_indices=[])
+        self._outputs = outputs or [torch.randn(1, 3, 8), torch.randn(1, 3, 8)]
+        self.forward_calls = 0
 
-    with mock.patch("torch.distributed.is_available", return_value=True), mock.patch(
-        "torch.distributed.is_initialized", return_value=True
-    ), mock.patch("torch.distributed.all_reduce") as all_reduce:
-        def _reduce_to_min(tensor, op=None):
-            assert op == torch.distributed.ReduceOp.MIN
-            tensor.fill_(3)
-
-        all_reduce.side_effect = _reduce_to_min
-        budget = _distributed_eval_step_budget(fabric, dataloader, max_iters=5)
-
-    assert budget == 3
-
-
-def test_distributed_eval_step_budget_falls_back_to_max_iters_for_unsized_loader():
-    fabric = mock.Mock(device=torch.device("cpu"))
-
-    class _UnsizedLoader:
-        def __len__(self):
-            raise TypeError("length unavailable")
-
-    with mock.patch("torch.distributed.is_available", return_value=False), mock.patch(
-        "torch.distributed.is_initialized", return_value=False
-    ):
-        budget = _distributed_eval_step_budget(fabric, _UnsizedLoader(), max_iters=5)
-
-    assert budget == 5
+    def forward(self, input_ids):
+        output = self._outputs[self.forward_calls]
+        self.forward_calls += 1
+        return output
 
 
 def test_evaluate_validation_split_uses_safe_eval_budget():
-    class _EvalModel(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.max_seq_length = 3
-            self.config = SimpleNamespace(harmful_expert_indices=[])
-            self._outputs = [torch.randn(1, 3, 8), torch.randn(1, 3, 8)]
-            self.forward_calls = 0
-
-        def forward(self, input_ids):
-            output = self._outputs[self.forward_calls]
-            self.forward_calls += 1
-            return output
-
     fabric = mock.Mock(device=torch.device("cpu"))
     fabric.barrier = mock.Mock()
     fabric.print = mock.Mock()
@@ -251,19 +206,15 @@ def test_evaluate_validation_split_uses_safe_eval_budget():
         torch.tensor([[3, 4, 5, 6]]),
     ]
 
-    with mock.patch("litgpt.safemoe.pretrain._distributed_eval_step_budget", return_value=2), mock.patch(
-        "litgpt.safemoe.pretrain._collect_cached_routing_counts", return_value=(4, 1)
-    ), mock.patch("litgpt.safemoe.pretrain.chunked_cross_entropy", side_effect=[torch.tensor(1.0), torch.tensor(3.0)]), mock.patch(
-        "litgpt.safemoe.pretrain._reduce_validation_totals", side_effect=lambda fabric, total_loss, count: (torch.tensor(total_loss), count)
-    ), mock.patch(
-        "litgpt.safemoe.pretrain._reduce_routing_counts", side_effect=lambda fabric, total_dispatches, harmful_dispatches: (total_dispatches, harmful_dispatches)
+    with mock.patch("litgpt.safemoe.pretrain._collect_cached_routing_counts", return_value=(4, 1)), mock.patch(
+        "litgpt.safemoe.pretrain.chunked_cross_entropy", side_effect=[torch.tensor(1.0), torch.tensor(3.0)]
     ):
         result = _evaluate_validation_split(
             fabric=fabric,
             model=model,
             val_dataloader=batches,
             split_name="D_std",
-            max_iters=5,
+            max_iters=2,
             verbose=False,
         )
 
@@ -274,6 +225,100 @@ def test_evaluate_validation_split_uses_safe_eval_budget():
     assert result.routing_harmful_frac == pytest.approx(0.25)
     assert model.forward_calls == 2
     assert model.training is True
+
+
+def test_evaluate_validation_split_uses_max_iters_for_unsized_loader():
+    fabric = mock.Mock(device=torch.device("cpu"))
+    fabric.barrier = mock.Mock()
+    fabric.print = mock.Mock()
+    model = _EvalModel(outputs=[torch.randn(1, 3, 8)] * 5)
+
+    class _UnsizedLoader:
+        def __iter__(self):
+            return iter(
+                [
+                    torch.tensor([[1, 2, 3, 4]]),
+                    torch.tensor([[2, 3, 4, 5]]),
+                    torch.tensor([[3, 4, 5, 6]]),
+                ]
+            )
+
+        def __len__(self):
+            raise TypeError("length unavailable")
+
+    with mock.patch("litgpt.safemoe.pretrain._collect_cached_routing_counts", return_value=(2, 1)), mock.patch(
+        "litgpt.safemoe.pretrain.chunked_cross_entropy", side_effect=[torch.tensor(1.0), torch.tensor(2.0)]
+    ), mock.patch("torch.distributed.is_available", return_value=False), mock.patch(
+        "torch.distributed.is_initialized", return_value=False
+    ):
+        result = _evaluate_validation_split(
+            fabric=fabric,
+            model=model,
+            val_dataloader=_UnsizedLoader(),
+            split_name="D_harmful",
+            max_iters=2,
+            verbose=False,
+        )
+
+    assert result.batches_evaluated == 2
+    assert model.forward_calls == 2
+    assert result.dispatch_count == 4
+    assert result.harmful_dispatches == 2
+
+
+def test_evaluate_validation_split_uses_distributed_min_budget_and_reductions():
+    fabric = mock.Mock(device=torch.device("cpu"))
+    fabric.barrier = mock.Mock()
+    fabric.print = mock.Mock()
+    model = _EvalModel(outputs=[torch.randn(1, 3, 8)] * 5)
+
+    batches = [
+        torch.tensor([[1, 2, 3, 4]]),
+        torch.tensor([[2, 3, 4, 5]]),
+        torch.tensor([[3, 4, 5, 6]]),
+        torch.tensor([[4, 5, 6, 7]]),
+    ]
+    reduce_calls = []
+
+    def _all_reduce(tensor, op=None):
+        reduce_calls.append((tensor.dtype, op, int(tensor.item()) if tensor.dtype == torch.long else float(tensor.item())))
+        if tensor.dtype == torch.long and op == torch.distributed.ReduceOp.MIN:
+            tensor.fill_(2)
+            return
+        if tensor.dtype == torch.float32:
+            tensor.fill_(8.0)
+            return
+        if tensor.dtype == torch.long and len(reduce_calls) == 3:
+            tensor.fill_(4)
+            return
+        if tensor.dtype == torch.long and len(reduce_calls) == 4:
+            tensor.fill_(12)
+            return
+        if tensor.dtype == torch.long and len(reduce_calls) == 5:
+            tensor.fill_(4)
+            return
+        raise AssertionError(f"unexpected all_reduce call: {reduce_calls[-1]}")
+
+    with mock.patch("litgpt.safemoe.pretrain._collect_cached_routing_counts", return_value=(3, 1)), mock.patch(
+        "litgpt.safemoe.pretrain.chunked_cross_entropy", side_effect=[torch.tensor(1.0), torch.tensor(3.0)]
+    ), mock.patch("torch.distributed.is_available", return_value=True), mock.patch(
+        "torch.distributed.is_initialized", return_value=True
+    ), mock.patch("torch.distributed.all_reduce", side_effect=_all_reduce):
+        result = _evaluate_validation_split(
+            fabric=fabric,
+            model=model,
+            val_dataloader=batches,
+            split_name="D_std",
+            max_iters=5,
+            verbose=False,
+        )
+
+    assert model.forward_calls == 2
+    assert result.batches_evaluated == 4
+    assert result.loss.item() == pytest.approx(2.0)
+    assert result.dispatch_count == 12
+    assert result.harmful_dispatches == 4
+    assert result.routing_harmful_frac == pytest.approx(1 / 3)
 
 
 def test_collect_validation_summary_metric_keys():
@@ -313,13 +358,63 @@ def test_collect_validation_summary_metric_keys():
     assert summary.scalar_metrics["ablated_routing_margin"] == pytest.approx(0.55)
 
 
+def test_main_rejects_resume_from_model_only_checkpoint(tmp_path):
+    resume_path = tmp_path / "step-00000001" / "lit_model.pth"
+    resume_path.parent.mkdir(parents=True)
+    torch.save({"model": {"weights": torch.tensor([1.0])}}, resume_path)
+
+    fabric = mock.Mock(
+        global_rank=0,
+        world_size=1,
+        device=torch.device("cpu"),
+        strategy=mock.Mock(),
+    )
+    fabric.seed_everything = mock.Mock()
+    fabric.load_raw = mock.Mock()
+    fabric.load = mock.Mock()
+    fabric.print = mock.Mock()
+
+    model = mock.Mock(max_seq_length=8, config=_make_safemoe_config())
+    data = mock.Mock()
+    data.initialize_loaders.return_value = {"val_loaders": {"D_std": object()}}
+    registry = mock.Mock()
+
+    with mock.patch.object(safemoe_pretrain, "_setup_model", return_value=model), mock.patch.object(
+        safemoe_pretrain, "_setup_split_dataloaders", return_value={"D_std": object()}
+    ), mock.patch.object(safemoe_pretrain, "HarmfulParamRegistry", return_value=registry), mock.patch.object(
+        safemoe_pretrain, "_build_optimizer", return_value=mock.Mock()
+    ), mock.patch.object(safemoe_pretrain, "find_resume_path", return_value=resume_path):
+        with pytest.raises(ValueError, match="without optimizer state"):
+            safemoe_pretrain.main(
+                fabric=fabric,
+                devices=1,
+                num_nodes=1,
+                seed=123,
+                initial_checkpoint_dir=None,
+                resume=True,
+                config=_make_safemoe_config(),
+                data=data,
+                out_dir=tmp_path / "out",
+                tokenizer_dir=None,
+                tokenizer=None,
+                train=SimpleNamespace(max_seq_length=None, micro_batch_size=1, epochs=None, max_tokens=1, max_norm=1.0),
+                eval=SimpleNamespace(
+                    max_iters=1,
+                    interval=1,
+                    initial_validation=False,
+                    final_validation=False,
+                    max_new_tokens=None,
+                ),
+                optimizer="AdamW",
+            )
+
+    fabric.load.assert_not_called()
+
+
 def test_evaluate_with_ablation_restores_weights_and_logs_metrics():
     fixture = _make_registry_fixture()
     harmful_params = fixture.registry.parameters_by_type("theta_harmful")
-    qkv_param = fixture.registry._qkv_harmful_metadata[0][0]
-    qkv_slices = fixture.registry._qkv_harmful_metadata[0][1]
     harmful_before = [param.detach().clone() for param in harmful_params]
-    qkv_before = qkv_param.detach().clone()
     model = fixture.model
     model.train(True)
 
@@ -337,8 +432,6 @@ def test_evaluate_with_ablation_restores_weights_and_logs_metrics():
         assert kwargs["metric_prefix"] == "ablated_"
         assert kwargs["verbose"] is False
         assert all(torch.count_nonzero(param) == 0 for param in harmful_params)
-        for row_slice in qkv_slices:
-            assert torch.count_nonzero(qkv_param[row_slice]) == 0
         return summary
 
     with mock.patch("litgpt.safemoe.pretrain.collect_validation_summary", side_effect=_check_ablation):
@@ -355,32 +448,12 @@ def test_evaluate_with_ablation_restores_weights_and_logs_metrics():
     assert model.training is True
     for param, before in zip(harmful_params, harmful_before):
         torch.testing.assert_close(param, before)
-    torch.testing.assert_close(qkv_param, qkv_before)
     fabric.log_dict.assert_called_once_with(summary.scalar_metrics, step=7)
-
-
-def test_validate_resume_checkpoint_rejects_model_only_checkpoint(tmp_path):
-    checkpoint_path = tmp_path / "step-00000001" / "lit_model.pth"
-    checkpoint_path.parent.mkdir(parents=True)
-    torch.save({"model": {"weights": torch.tensor([1.0])}}, checkpoint_path)
-
-    with pytest.raises(ValueError, match="without optimizer state"):
-        _validate_resume_checkpoint(checkpoint_path)
-
-
-
-def test_validate_resume_checkpoint_allows_full_checkpoint(tmp_path):
-    checkpoint_path = tmp_path / "final" / "lit_model.pth"
-    checkpoint_path.parent.mkdir(parents=True)
-    torch.save({"model": {"weights": torch.tensor([1.0])}, "optimizer": {"state": {}, "param_groups": []}}, checkpoint_path)
-
-    _validate_resume_checkpoint(checkpoint_path)
-
 
 
 def test_safemoe_layer_matches_llamamoe_without_masking():
     torch.manual_seed(1234)
-    config = _make_safemoe_config(harmful_expert_indices=[], harmful_attn_heads=[])
+    config = _make_safemoe_config(harmful_expert_indices=[])
     baseline = LLaMAMoE(config)
     safemoe = SafeMoELayer(config)
     safemoe.load_state_dict(baseline.state_dict())

@@ -22,9 +22,7 @@ from litgpt.generate.tp import main as generate_tp_fn
 from litgpt.parser_config import parser_commands
 from litgpt.pretrain import setup as pretrain_fn
 from litgpt.safemoe.ablate import setup as safemoe_ablate_fn
-from litgpt.safemoe.evaluate import evaluate_cli as safemoe_evaluate_fn
 from litgpt.safemoe.pretrain import setup as pretrain_safemoe_fn
-from litgpt.safemoe.surgery import setup as safemoe_surgery_fn
 from litgpt.scripts.convert_hf_checkpoint import convert_hf_checkpoint as convert_hf_checkpoint_fn
 from litgpt.scripts.convert_lit_checkpoint import convert_lit_checkpoint as convert_lit_checkpoint_fn
 from litgpt.scripts.convert_pretrained_checkpoint import (
@@ -57,8 +55,6 @@ PARSER_DATA = {
     "evaluate": evaluate_fn,
     "serve": serve_fn,
     "safemoe_ablate": safemoe_ablate_fn,
-    "safemoe_evaluate": safemoe_evaluate_fn,
-    "safemoe_surgery": safemoe_surgery_fn,
 }
 
 

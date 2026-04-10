@@ -11,7 +11,6 @@ log:
 stage: warmup
 base_checkpoint: checkpoints/Qwen3-30B-A3B-Base
 num_harmful_experts: 8
-num_harmful_attn_heads: 0
 epsilon: 1.0e-5
 warmup_routing_loss_weight: 0.1
 warmup_harmful_mass_floor: 0.7

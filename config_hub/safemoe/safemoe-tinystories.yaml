@@ -30,7 +30,6 @@ model_config:
   # SafeMoEConfig-specific fields:
   harmful_expert_indices: [0, 1]
   num_harmful_experts: 2
-  harmful_attn_heads: [0, 1]
 
 # Training-related arguments (TrainArgs fields).
 # gradient_accumulation_iters is computed as global_batch_size / micro_batch_size / devices.
