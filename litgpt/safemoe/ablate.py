@@ -25,6 +25,7 @@ def ablate(ckpt_dir: Path) -> None:
     model.load_state_dict(state["model"])
 
     registry = HarmfulParamRegistry(model, config)
+    registry.validate()
     id_to_name = {id(param): name for name, param in model.named_parameters()}
     zeroed_parameters = []
     total_pre_norm = 0.0

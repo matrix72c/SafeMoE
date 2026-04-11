@@ -16,31 +16,57 @@ class HarmfulParamRegistry:
     _EXPERT_RE = re.compile(r"transformer\.h\.\d+\.mlp\.experts\.(\d+)\.")
 
     def __init__(self, model: nn.Module, config: Config) -> None:
-        harmful_expert_indices = set(config.harmful_expert_indices)
-        theta_harmful: list[nn.Parameter] = []
-        theta_std: list[nn.Parameter] = []
-        theta_shared: list[nn.Parameter] = []
+        self._harmful_expert_indices = tuple(config.harmful_expert_indices)
+        harmful_expert_indices = set(self._harmful_expert_indices)
+        registry_names: dict[str, list[str]] = {
+            "theta_harmful": [],
+            "theta_std": [],
+            "theta_shared": [],
+        }
 
-        for name, param in model.named_parameters():
+        for name, _ in model.named_parameters():
             clean = name.replace("_fsdp_wrapped_module.", "")
             match = self._EXPERT_RE.match(clean)
             if match:
                 expert_idx = int(match.group(1))
-                if expert_idx in harmful_expert_indices:
-                    theta_harmful.append(param)
-                else:
-                    theta_std.append(param)
+                split = "theta_harmful" if expert_idx in harmful_expert_indices else "theta_std"
+                registry_names[split].append(clean)
             else:
-                theta_shared.append(param)
+                registry_names["theta_shared"].append(clean)
 
-        self._registry: dict[str, list[nn.Parameter]] = {
-            "theta_harmful": theta_harmful,
-            "theta_std": theta_std,
-            "theta_shared": theta_shared,
+        self._registry_names = registry_names
+        self._registry = self._resolve_registry(model)
+
+    def _resolve_parameter(self, model: nn.Module, name: str) -> nn.Parameter:
+        try:
+            return model.get_parameter(name)
+        except AttributeError as ex:
+            raise RuntimeError(f"Failed to resolve SafeMoE parameter '{name}' on the live model.") from ex
+
+    def _resolve_registry(self, model: nn.Module) -> dict[str, list[nn.Parameter]]:
+        return {
+            split: [self._resolve_parameter(model, name) for name in names]
+            for split, names in self._registry_names.items()
         }
+
+    def bind(self, model: nn.Module) -> None:
+        self._registry = self._resolve_registry(model)
 
     def parameters_by_type(self, split: str) -> list[nn.Parameter]:
         return self._registry[split]
+
+    def validate(self) -> None:
+        if self._harmful_expert_indices and not self._registry_names["theta_harmful"]:
+            raise RuntimeError(
+                "SafeMoE harmful parameter registry is empty despite configured harmful experts: "
+                f"harmful_expert_indices={list(self._harmful_expert_indices)}. "
+                "Build HarmfulParamRegistry before FSDP wrapping so expert parameter names are still visible."
+            )
+        if self._harmful_expert_indices and not self._registry["theta_harmful"]:
+            raise RuntimeError(
+                "SafeMoE harmful parameter registry could not bind harmful parameters onto the live model: "
+                f"harmful_expert_indices={list(self._harmful_expert_indices)}."
+            )
 
 
 class GradientMasker:

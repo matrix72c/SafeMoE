@@ -194,7 +194,7 @@ def _setup_model(fabric: L.Fabric, config: Config, train: TrainArgs) -> GPT:
 
     fabric.print(f"Time to instantiate model: {time.perf_counter() - t0:.02f} seconds.")
     fabric.print(f"Total parameters: {num_parameters(model):,}")
-    return fabric.setup(model)
+    return model
 
 
 
@@ -642,6 +642,11 @@ def main(
     fabric.seed_everything(seed)  # same seed for every process to init model (FSDP)
 
     model = _setup_model(fabric, config, train)
+    registry = HarmfulParamRegistry(model, config)
+    registry.validate()
+    model = fabric.setup(model)
+    registry.bind(_unwrap_safemoe_model(model))
+    registry.validate()
 
     data.connect(tokenizer=tokenizer, batch_size=train.micro_batch_size, max_seq_length=model.max_seq_length)
     data_loaders = data.initialize_loaders()
@@ -650,7 +655,6 @@ def main(
     if initial_checkpoint_dir:
         fabric.load_raw(initial_checkpoint_dir / "lit_model.pth", model)
 
-    registry = HarmfulParamRegistry(_unwrap_safemoe_model(model), config)
     optimizer = _build_optimizer(fabric, optimizer, registry)
 
     state = {

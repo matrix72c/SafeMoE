@@ -4,7 +4,7 @@ devices: auto
 num_nodes: 1
 seed: 42
 logger_name: wandb
-run_name: safemoe-qwen-warmup-wmdp-v2
+run_name: safemoe-qwen-warmup-wmdp-0411-v1
 precision: bf16-mixed
 log:
   project: safemoe
@@ -12,9 +12,8 @@ log:
 stage: warmup
 base_checkpoint: checkpoints/Qwen3-30B-A3B-Base
 num_harmful_experts: 8
-num_harmful_attn_heads: 0
 epsilon: 1.0e-5
-warmup_routing_loss_weight: 0.2
+warmup_routing_loss_weight: 5.0
 warmup_harmful_mass_floor: 0.4
 warmup_std_mass_ceiling: 0.1
 
@@ -80,6 +79,6 @@ data:
         unlabel_weight: 0.0
         prepare_mode: in_memory
 
-upsample_std: 4.0
-upsample_harmful: 1.0
+upsample_std: 1.0
+upsample_harmful: 8.0
 upsample_unlabeled: 0.0
