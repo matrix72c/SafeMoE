@@ -136,6 +136,9 @@ When modifying training code, keep this partitioning explicit and inspectable. R
 ## Repository-Specific Guidance
 - Preserve the distinction between harmful-specific, standard, and shared parameters.
 - Keep routing, masking, surgery, and ablation logic explicit rather than abstracting it away.
+- All relevant experiment records should be logged on the Weights & Biases platform.
+- Experiment tracking for this repository is centered on the W&B project `jesse-jin-southeast-university/safemoe`.
+- When experiment history, metrics, or related records need to be queried from Claude Code, use the wandb MCP server against `jesse-jin-southeast-university/safemoe`.
 - For changes in `litgpt/safemoe/pretrain.py`, verify whether they affect:
   - parameter ownership (`theta_harmful` / `theta_std` / `theta_shared`)
   - router behavior during warmup and transfer
