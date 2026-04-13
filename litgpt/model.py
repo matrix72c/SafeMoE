@@ -824,6 +824,7 @@ class SafeMoELayer(LLaMAMoE):
         super().__init__(config)
         self._activation_masking_enabled: bool = False
         self._harmful_indices: list[int] = list(getattr(config, "harmful_expert_indices", []))
+        self._force_harmful_routing: bool = bool(getattr(config, "force_harmful_routing", False))
         harmful_expert_set = set(self._harmful_indices)
         self._harmful_expert_mask: tuple[bool, ...] = tuple(
             expert_idx in harmful_expert_set for expert_idx in range(config.n_expert)
@@ -834,6 +835,17 @@ class SafeMoELayer(LLaMAMoE):
         self.register_buffer("_harmful_lookup", harmful_lookup, persistent=False)
         self._last_indices: Optional[torch.Tensor] = None
         self._last_harmful_routing_mass: Optional[torch.Tensor] = None
+        if self._force_harmful_routing:
+            if config.n_expert_groups:
+                raise ValueError("force_harmful_routing does not support grouped expert routing.")
+            if not self._harmful_indices:
+                raise ValueError(
+                    "force_harmful_routing=True requires non-empty harmful_expert_indices."
+                )
+            if len(self._harmful_indices) < config.n_expert_per_token:
+                raise ValueError(
+                    "force_harmful_routing=True requires len(harmful_expert_indices) >= n_expert_per_token."
+                )
 
     def reset_parameters(self) -> None:
         self._harmful_lookup.zero_()
@@ -849,6 +861,8 @@ class SafeMoELayer(LLaMAMoE):
 
         if not self.config.n_expert_groups:
             router = self.gate(x_flat)
+            if self._force_harmful_routing:
+                router = router.masked_fill(~self._harmful_lookup.unsqueeze(0), torch.finfo(router.dtype).min)
             probs, indices = torch.topk(router, self.config.n_expert_per_token)
             probs = F.softmax(probs, dim=1, dtype=torch.float).to(dtype=x_flat.dtype)
         else:

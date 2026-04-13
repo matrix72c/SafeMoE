@@ -461,6 +461,8 @@ def setup(
     base_checkpoint: Optional[Path] = None,
     num_harmful_experts: Optional[int] = None,
     epsilon: Optional[float] = None,
+    harmful_only: bool = False,
+    force_harmful_routing: bool = False,
 ):
     """Pretrain a SafeMoE model with split-aware masking and validation.
 
@@ -491,6 +493,8 @@ def setup(
         base_checkpoint: Base checkpoint used to derive a warmup surgery checkpoint.
         num_harmful_experts: Count of harmful experts for warmup auto-surgery.
         epsilon: Noise scale for warmup auto-surgery.
+        harmful_only: If True, train only on the D_harmful split.
+        force_harmful_routing: If True, force MoE routing to harmful experts only.
     """
     if any(w is None for w in [upsample_std, upsample_harmful, upsample_unlabeled]):
         raise ValueError(
@@ -540,6 +544,7 @@ def setup(
         raw = yaml.safe_load((initial_checkpoint_dir / "model_config.yaml").read_text())
         config = Config(**{key: value for key, value in raw.items() if not isinstance(value, dict)})
         hparams["model_config"] = asdict(config)
+    config.force_harmful_routing = force_harmful_routing
     precision = precision or get_default_supported_precision(training=True)
     devices = parse_devices(devices)
     out_dir = resolve_out_dir(out_dir, run_name=run_name)
@@ -608,6 +613,7 @@ def setup(
         warmup_routing_loss_weight=warmup_routing_loss_weight,
         warmup_harmful_mass_floor=warmup_harmful_mass_floor,
         warmup_std_mass_ceiling=warmup_std_mass_ceiling,
+        harmful_only=harmful_only,
     )
 
 
@@ -633,6 +639,7 @@ def main(
     warmup_routing_loss_weight: float = 0.1,
     warmup_harmful_mass_floor: float = 0.6,
     warmup_std_mass_ceiling: float = 0.4,
+    harmful_only: bool = False,
 ) -> None:
     validate_args(train, eval, initial_checkpoint_dir, resume)
 
@@ -712,6 +719,7 @@ def main(
         warmup_std_mass_ceiling=warmup_std_mass_ceiling,
         registry=registry,
         val_loaders=val_loaders_for_eval,
+        harmful_only=harmful_only,
     )
 
     total_tokens = state["iter_num"] * train.micro_batch_size * model.max_seq_length * fabric.world_size
@@ -764,6 +772,7 @@ def fit(
     warmup_routing_loss_weight: float = 0.1,
     warmup_harmful_mass_floor: float = 0.6,
     warmup_std_mass_ceiling: float = 0.4,
+    harmful_only: bool = False,
 ) -> None:
     model = state["model"]
     optimizer = state["optimizer"]
@@ -808,7 +817,12 @@ def fit(
     log_iter_interval = train.log_interval * accum_iters
     initial_step = state["step_count"]
 
-    active_labels = [l for l in list(SPLIT_LABELS) if l in data._loaders]
+    if harmful_only:
+        if "D_harmful" not in data._loaders:
+            raise ValueError("harmful_only=True requires D_harmful loader, but D_harmful is missing.")
+        active_labels = ["D_harmful"]
+    else:
+        active_labels = [l for l in list(SPLIT_LABELS) if l in data._loaders]
     split_iters = {label: CycleIterator(data.get_loader(label)) for label in active_labels}
     split_weights = {
         "D_std": upsample_std,
@@ -816,11 +830,18 @@ def fit(
         "D_unlabeled": upsample_unlabeled,
     }
     weights = [split_weights[label] for label in active_labels]
+    if harmful_only:
+        weights = [1.0]
+    if not active_labels:
+        raise ValueError("No active training splits found. Check SafeData loader setup.")
+    if sum(weights) <= 0:
+        raise ValueError(f"All split sampling weights are non-positive for active splits: {active_labels}")
 
     fabric.barrier()
     total_t0 = time.perf_counter()
 
-    warmup_iters = train.warmup_iters(devices, num_nodes, max_iters, data.get_loader("D_std"))
+    warmup_loader_label = "D_harmful" if harmful_only else ("D_std" if "D_std" in active_labels else active_labels[0])
+    warmup_iters = train.warmup_iters(devices, num_nodes, max_iters, data.get_loader(warmup_loader_label))
 
     while state["step_count"] < max_steps:
         iter_t0 = time.perf_counter()

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node:*)",
+      "WebSearch",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:sites.google.com)",
+      "Bash(git:*)",
+      "Bash(python -c \"import pandas as pd; df = pd.read_parquet\\('/mnt/shared-storage-gpfs2/wenxiaoyu-gpfs02/jincheng/safemoe/data/tinystories/data/train-00000-of-00004-2d5a1467fff1081b.parquet'\\); print\\(df.columns.tolist\\(\\)\\); print\\(df.shape\\); print\\(df.head\\(2\\)\\)\" 2>&1)",
+      "mcp__wandb__query_wandb_tool"
+    ]
+  }
+}
