@@ -217,13 +217,15 @@ def _build_optimizer(
     fabric: L.Fabric,
     optimizer_config: Union[str, Dict],
     registry: HarmfulParamRegistry,
+    freeze_theta_shared: bool = False,
 ):
+    trainable_params = registry.parameters_by_type("theta_harmful") + registry.parameters_by_type("theta_std")
+    if not freeze_theta_shared:
+        trainable_params += registry.parameters_by_type("theta_shared")
     extra_kwargs = {"fused": fabric.device.type == "cuda"}
     optimizer = instantiate_torch_optimizer(
         optimizer_config,
-        registry.parameters_by_type("theta_harmful")
-        + registry.parameters_by_type("theta_std")
-        + registry.parameters_by_type("theta_shared"),
+        trainable_params,
         **extra_kwargs,
     )
     return fabric.setup_optimizers(optimizer)
@@ -463,6 +465,7 @@ def setup(
     epsilon: Optional[float] = None,
     harmful_only: bool = False,
     force_harmful_routing: bool = False,
+    freeze_theta_shared: bool = False,
 ):
     """Pretrain a SafeMoE model with split-aware masking and validation.
 
@@ -495,6 +498,7 @@ def setup(
         epsilon: Noise scale for warmup auto-surgery.
         harmful_only: If True, train only on the D_harmful split.
         force_harmful_routing: If True, force MoE routing to harmful experts only.
+        freeze_theta_shared: If True, freeze shared parameters and keep them out of optimizer updates.
     """
     if any(w is None for w in [upsample_std, upsample_harmful, upsample_unlabeled]):
         raise ValueError(
@@ -614,6 +618,7 @@ def setup(
         warmup_harmful_mass_floor=warmup_harmful_mass_floor,
         warmup_std_mass_ceiling=warmup_std_mass_ceiling,
         harmful_only=harmful_only,
+        freeze_theta_shared=freeze_theta_shared,
     )
 
 
@@ -640,6 +645,7 @@ def main(
     warmup_harmful_mass_floor: float = 0.6,
     warmup_std_mass_ceiling: float = 0.4,
     harmful_only: bool = False,
+    freeze_theta_shared: bool = False,
 ) -> None:
     validate_args(train, eval, initial_checkpoint_dir, resume)
 
@@ -651,9 +657,15 @@ def main(
     model = _setup_model(fabric, config, train)
     registry = HarmfulParamRegistry(model, config)
     registry.validate()
+    if freeze_theta_shared:
+        for param in registry.parameters_by_type("theta_shared"):
+            param.requires_grad_(False)
     model = fabric.setup(model)
     registry.bind(_unwrap_safemoe_model(model))
     registry.validate()
+    if freeze_theta_shared:
+        for param in registry.parameters_by_type("theta_shared"):
+            param.requires_grad_(False)
 
     data.connect(tokenizer=tokenizer, batch_size=train.micro_batch_size, max_seq_length=model.max_seq_length)
     data_loaders = data.initialize_loaders()
@@ -662,7 +674,7 @@ def main(
     if initial_checkpoint_dir:
         fabric.load_raw(initial_checkpoint_dir / "lit_model.pth", model)
 
-    optimizer = _build_optimizer(fabric, optimizer, registry)
+    optimizer = _build_optimizer(fabric, optimizer, registry, freeze_theta_shared=freeze_theta_shared)
 
     state = {
         "model": model,

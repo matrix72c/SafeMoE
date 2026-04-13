@@ -4,7 +4,7 @@ devices: auto
 num_nodes: 1
 seed: 42
 logger_name: wandb
-run_name: safemoe-harmful-experts-only-0413v1
+run_name: safemoe-qwen-warmup-wmdp-harmful-bootstrap-freeze-shared
 precision: bf16-mixed
 log:
   project: safemoe
@@ -13,11 +13,18 @@ stage: warmup
 base_checkpoint: checkpoints/Qwen3-30B-A3B-Base
 num_harmful_experts: 8
 epsilon: 1.0e-5
+
+# Warmup auxiliary routing loss; with forced harmful routing, this can be 0.
 warmup_routing_loss_weight: 0.0
 warmup_harmful_mass_floor: 0.2
 warmup_std_mass_ceiling: 0.2
+
+# Only train on D_harmful batches.
 harmful_only: true
+# Hard constrain router to pick from harmful experts only.
 force_harmful_routing: true
+# Freeze shared parameters (attention/embedding/router/lm_head/norm, etc.).
+freeze_theta_shared: true
 
 train:
   micro_batch_size: 2
@@ -81,6 +88,7 @@ data:
         unlabel_weight: 0.0
         prepare_mode: in_memory
 
+# Keep only harmful split active during training.
 upsample_std: 0.0
 upsample_harmful: 1.0
 upsample_unlabeled: 0.0
