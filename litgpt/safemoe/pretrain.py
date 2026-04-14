@@ -677,7 +677,22 @@ def main(
     val_loaders_for_eval = _setup_split_dataloaders(fabric, data_loaders["val_loaders"])
 
     if initial_checkpoint_dir:
-        fabric.load_raw(initial_checkpoint_dir / "lit_model.pth", model)
+        init_ckpt = initial_checkpoint_dir / "lit_model.pth"
+        init_state = lazy_load(init_ckpt)
+        has_model_key = False
+        if hasattr(init_state, "__contains__"):
+            try:
+                has_model_key = "model" in init_state
+            except Exception:
+                has_model_key = False
+
+        # Support both raw model checkpoints and step-* training-state checkpoints.
+        if has_model_key:
+            fabric.print(f"Loading initial model weights from training-state checkpoint: {init_ckpt}")
+            fabric.load(init_ckpt, {"model": model})
+        else:
+            fabric.print(f"Loading initial model weights from raw checkpoint: {init_ckpt}")
+            fabric.load_raw(init_ckpt, model)
 
     optimizer = _build_optimizer(fabric, optimizer, registry, freeze_theta_shared=freeze_theta_shared)
 
