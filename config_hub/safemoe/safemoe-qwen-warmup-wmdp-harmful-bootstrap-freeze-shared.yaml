@@ -4,27 +4,32 @@ devices: auto
 num_nodes: 1
 seed: 42
 logger_name: wandb
-run_name: safemoe-qwen-warmup-wmdp-harmful-bootstrap-freeze-shared
+run_name: safemoe-qwen-warmup-wmdp-harmful-bootstrap-freeze-shared-stage2-0414
 precision: bf16-mixed
 log:
   project: safemoe
 
 stage: warmup
-base_checkpoint: checkpoints/Qwen3-30B-A3B-Base
-num_harmful_experts: 8
-epsilon: 1.0e-5
+# base_checkpoint: checkpoints/safemoe-qwen-warmup-wmdp-harmful-bootstrap-freeze-shared/step-00010000
+# num_harmful_experts: 8
+# epsilon: 1.0e-5
+
+# initial_checkpoint_dir: checkpoints/safemoe-qwen-warmup-wmdp-harmful-bootstrap-freeze-shared/step-00010000
+resume: checkpoints/safemoe-qwen-warmup-wmdp-harmful-bootstrap-freeze-shared/step-00010000/lit_model.pth  # 从已有 step checkpoint 继续训练（作为续训入口）
+resume_model_only: true  # 若该 checkpoint 不含 optimizer state，仅加载模型权重并重置优化器/step 计数
+
 
 # Warmup auxiliary routing loss; with forced harmful routing, this can be 0.
-warmup_routing_loss_weight: 0.0
-warmup_harmful_mass_floor: 0.2
+warmup_routing_loss_weight: 0.1
+warmup_harmful_mass_floor: 0.5
 warmup_std_mass_ceiling: 0.2
 
 # Only train on D_harmful batches.
-harmful_only: true
+harmful_only: false
 # Hard constrain router to pick from harmful experts only.
-force_harmful_routing: true
+force_harmful_routing: false
 # Freeze shared parameters (attention/embedding/router/lm_head/norm, etc.).
-freeze_theta_shared: true
+freeze_theta_shared: false
 
 train:
   micro_batch_size: 2
@@ -89,6 +94,6 @@ data:
         prepare_mode: in_memory
 
 # Keep only harmful split active during training.
-upsample_std: 0.0
+upsample_std: 0.5
 upsample_harmful: 1.0
 upsample_unlabeled: 0.0

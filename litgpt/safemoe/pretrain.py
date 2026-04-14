@@ -466,6 +466,7 @@ def setup(
     harmful_only: bool = False,
     force_harmful_routing: bool = False,
     freeze_theta_shared: bool = False,
+    resume_model_only: bool = False,
 ):
     """Pretrain a SafeMoE model with split-aware masking and validation.
 
@@ -499,6 +500,8 @@ def setup(
         harmful_only: If True, train only on the D_harmful split.
         force_harmful_routing: If True, force MoE routing to harmful experts only.
         freeze_theta_shared: If True, freeze shared parameters and keep them out of optimizer updates.
+        resume_model_only: If True, allows `--resume` from model-only checkpoints by restoring model weights and
+            resetting optimizer and step counters.
     """
     if any(w is None for w in [upsample_std, upsample_harmful, upsample_unlabeled]):
         raise ValueError(
@@ -619,6 +622,7 @@ def setup(
         warmup_std_mass_ceiling=warmup_std_mass_ceiling,
         harmful_only=harmful_only,
         freeze_theta_shared=freeze_theta_shared,
+        resume_model_only=resume_model_only,
     )
 
 
@@ -646,6 +650,7 @@ def main(
     warmup_std_mass_ceiling: float = 0.4,
     harmful_only: bool = False,
     freeze_theta_shared: bool = False,
+    resume_model_only: bool = False,
 ) -> None:
     validate_args(train, eval, initial_checkpoint_dir, resume)
 
@@ -688,12 +693,24 @@ def main(
         fabric.print(f"Resuming training from {resume}")
         checkpoint_state = lazy_load(resume)
         if "optimizer" not in checkpoint_state:
-            raise ValueError(
-                "Cannot resume SafeMoE training from a checkpoint without optimizer state: "
-                f"{resume}. Periodic step-* checkpoints are model-only; resume from a full checkpoint such as out_dir/final instead."
+            if not resume_model_only:
+                raise ValueError(
+                    "Cannot resume SafeMoE training from a checkpoint without optimizer state: "
+                    f"{resume}. Periodic step-* checkpoints are model-only; resume from a full checkpoint such as out_dir/final instead. "
+                    "If you want to continue from model-only checkpoints, set `resume_model_only=true`."
+                )
+            fabric.print(
+                "Checkpoint has no optimizer state; loading model-only checkpoint and resetting optimizer/step counters."
             )
-        fabric.load(resume, state)
-        _restore_rng_state(state)
+            if "model" in checkpoint_state:
+                fabric.load(resume, {"model": model})
+            else:
+                fabric.load_raw(resume, model)
+            state["iter_num"] = 0
+            state["step_count"] = 0
+        else:
+            fabric.load(resume, state)
+            _restore_rng_state(state)
 
     gradient_masker = GradientMasker(registry)
     activation_masker = ActivationMasker(_unwrap_safemoe_model(model))
