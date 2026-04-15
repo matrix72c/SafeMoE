@@ -4,15 +4,18 @@ devices: auto
 num_nodes: 1
 seed: 42
 logger_name: wandb
-run_name: safemoe-qwen-warmup-wmdp-soft-e8-v1
+run_name: safemoe-qwen-warmup-wmdp-harmful-bootstrap-0410-v1 # 名字每次要改
 precision: bf16-mixed
 log:
   project: safemoe
 
 stage: warmup
-initial_checkpoint_dir: checkpoints/Qwen3-30B-A3B-Base-e8-seed42-eps1e-05
+base_checkpoint: checkpoints/Qwen3-30B-A3B-Base
+num_harmful_experts: 8
+num_harmful_attn_heads: 0
+epsilon: 1.0e-5
 warmup_routing_loss_weight: 1.0
-warmup_harmful_mass_floor: 0.4
+warmup_harmful_mass_floor: 0.7
 warmup_std_mass_ceiling: 0.1
 
 train:
@@ -52,9 +55,9 @@ data:
         text_column: text
         role: std
         label_ratio: 0.01
-        unlabel_ratio: 0.09
+        unlabel_ratio: 0.0
         label_weight: 0.9
-        unlabel_weight: 1.0
+        unlabel_weight: 0.0
         prepare_mode: chunked
         train_is_shuffled: true
         val_strategy: smallest_train_shard
@@ -77,6 +80,6 @@ data:
         unlabel_weight: 0.0
         prepare_mode: in_memory
 
-upsample_std: 1.0
-upsample_harmful: 2.0
-upsample_unlabeled: 1.0
+upsample_std: 1
+upsample_harmful: 4.0
+upsample_unlabeled: 0.0
