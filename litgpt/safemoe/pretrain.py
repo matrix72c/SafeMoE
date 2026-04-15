@@ -133,6 +133,7 @@ def warmup_routing_loss(
     split_label: str,
     harmful_mass_floor: float = 0.6,
     std_mass_ceiling: float = 0.4,
+    routing_loss_type: Literal["softplus", "relu"] = "softplus",
 ) -> torch.Tensor:
     """Return the warmup auxiliary routing loss for labeled splits only.
 
@@ -140,10 +141,17 @@ def warmup_routing_loss(
     D_std pushes harmful routing mass below ``std_mass_ceiling``.
     D_unlabeled contributes no auxiliary routing loss during warmup.
     """
+    def _penalty(x: torch.Tensor) -> torch.Tensor:
+        if routing_loss_type == "softplus":
+            return F.softplus(x)
+        if routing_loss_type == "relu":
+            return F.relu(x)
+        raise ValueError(f"Unsupported warmup routing loss type: {routing_loss_type!r}")
+
     if split_label == "D_harmful":
-        return F.softplus(harmful_mass.new_tensor(harmful_mass_floor) - harmful_mass)
+        return _penalty(harmful_mass.new_tensor(harmful_mass_floor) - harmful_mass)
     if split_label == "D_std":
-        return F.softplus(harmful_mass - harmful_mass.new_tensor(std_mass_ceiling))
+        return _penalty(harmful_mass - harmful_mass.new_tensor(std_mass_ceiling))
     return harmful_mass.new_zeros(())
 
 
@@ -460,6 +468,7 @@ def setup(
     warmup_routing_loss_weight: float = 0.1,
     warmup_harmful_mass_floor: float = 0.6,
     warmup_std_mass_ceiling: float = 0.4,
+    warmup_routing_loss_type: Literal["softplus", "relu"] = "softplus",
     base_checkpoint: Optional[Path] = None,
     num_harmful_experts: Optional[int] = None,
     epsilon: Optional[float] = None,
@@ -494,6 +503,8 @@ def setup(
             unlabeled sampling; nonzero values are valid during both warmup and transfer.
         stage: ``"warmup"`` applies the auxiliary routing loss only on D_std and D_harmful, while
             ``"transfer"`` runs the full SGTM objective. Warmup may still sample D_unlabeled when configured.
+        warmup_routing_loss_type: Routing loss function used in warmup auxiliary routing loss.
+            ``"softplus"`` keeps a smooth non-zero tail, while ``"relu"`` is a hard-threshold hinge.
         base_checkpoint: Base checkpoint used to derive a warmup surgery checkpoint.
         num_harmful_experts: Count of harmful experts for warmup auto-surgery.
         epsilon: Noise scale for warmup auto-surgery.
@@ -620,6 +631,7 @@ def setup(
         warmup_routing_loss_weight=warmup_routing_loss_weight,
         warmup_harmful_mass_floor=warmup_harmful_mass_floor,
         warmup_std_mass_ceiling=warmup_std_mass_ceiling,
+        warmup_routing_loss_type=warmup_routing_loss_type,
         harmful_only=harmful_only,
         freeze_theta_shared=freeze_theta_shared,
         resume_model_only=resume_model_only,
@@ -648,6 +660,7 @@ def main(
     warmup_routing_loss_weight: float = 0.1,
     warmup_harmful_mass_floor: float = 0.6,
     warmup_std_mass_ceiling: float = 0.4,
+    warmup_routing_loss_type: Literal["softplus", "relu"] = "softplus",
     harmful_only: bool = False,
     freeze_theta_shared: bool = False,
     resume_model_only: bool = False,
@@ -761,6 +774,7 @@ def main(
         warmup_routing_loss_weight=warmup_routing_loss_weight,
         warmup_harmful_mass_floor=warmup_harmful_mass_floor,
         warmup_std_mass_ceiling=warmup_std_mass_ceiling,
+        warmup_routing_loss_type=warmup_routing_loss_type,
         registry=registry,
         val_loaders=val_loaders_for_eval,
         harmful_only=harmful_only,
@@ -816,6 +830,7 @@ def fit(
     warmup_routing_loss_weight: float = 0.1,
     warmup_harmful_mass_floor: float = 0.6,
     warmup_std_mass_ceiling: float = 0.4,
+    warmup_routing_loss_type: Literal["softplus", "relu"] = "softplus",
     harmful_only: bool = False,
 ) -> None:
     model = state["model"]
@@ -923,6 +938,7 @@ def fit(
                             split_label,
                             harmful_mass_floor=warmup_harmful_mass_floor,
                             std_mass_ceiling=warmup_std_mass_ceiling,
+                            routing_loss_type=warmup_routing_loss_type,
                         )
                         total_loss = lm_loss + warmup_routing_loss_weight * routing_loss
                     else:

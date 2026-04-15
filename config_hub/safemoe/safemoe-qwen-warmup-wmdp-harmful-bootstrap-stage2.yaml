@@ -4,7 +4,7 @@ devices: auto
 num_nodes: 1
 seed: 42
 logger_name: wandb
-run_name: safemoe-qwen-warmup-wmdp-harmful-bootstrap-freeze-shared-stage2-0414
+run_name: safemoe-qwen-warmup-wmdp-harmful-bootstrap-nonfreeze-shared-stage2-relu-0415
 precision: bf16-mixed
 log:
   project: safemoe
@@ -20,7 +20,8 @@ initial_checkpoint_dir: checkpoints/safemoe-qwen-warmup-wmdp-harmful-bootstrap-f
 # Warmup auxiliary routing loss; with forced harmful routing, this can be 0.
 warmup_routing_loss_weight: 0.1
 warmup_harmful_mass_floor: 0.5
-warmup_std_mass_ceiling: 0.2
+warmup_std_mass_ceiling: 0.1
+warmup_routing_loss_type: relu
 
 # Only train on D_harmful batches.
 harmful_only: false
@@ -92,6 +93,6 @@ data:
         prepare_mode: in_memory
 
 # Keep only harmful split active during training.
-upsample_std: 0.5
+upsample_std: 0.25
 upsample_harmful: 1.0
 upsample_unlabeled: 0.0
