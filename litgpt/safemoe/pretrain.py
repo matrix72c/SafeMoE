@@ -466,6 +466,8 @@ def setup(
     upsample_unlabeled: Optional[float] = None,
     stage: Literal["transfer", "warmup"] = "transfer",
     warmup_routing_loss_weight: float = 0.1,
+    warmup_routing_loss_weight_harmful: Optional[float] = None,
+    warmup_routing_loss_weight_std: Optional[float] = None,
     warmup_harmful_mass_floor: float = 0.6,
     warmup_std_mass_ceiling: float = 0.4,
     warmup_routing_loss_type: Literal["softplus", "relu"] = "softplus",
@@ -503,6 +505,12 @@ def setup(
             unlabeled sampling; nonzero values are valid during both warmup and transfer.
         stage: ``"warmup"`` applies the auxiliary routing loss only on D_std and D_harmful, while
             ``"transfer"`` runs the full SGTM objective. Warmup may still sample D_unlabeled when configured.
+        warmup_routing_loss_weight: Global fallback weight for warmup routing loss when per-split
+            weights are not provided.
+        warmup_routing_loss_weight_harmful: Optional routing-loss weight for D_harmful.
+            Defaults to ``warmup_routing_loss_weight``.
+        warmup_routing_loss_weight_std: Optional routing-loss weight for D_std.
+            Defaults to ``warmup_routing_loss_weight``.
         warmup_routing_loss_type: Routing loss function used in warmup auxiliary routing loss.
             ``"softplus"`` keeps a smooth non-zero tail, while ``"relu"`` is a hard-threshold hinge.
         base_checkpoint: Base checkpoint used to derive a warmup surgery checkpoint.
@@ -518,6 +526,10 @@ def setup(
         raise ValueError(
             "upsample_std/harmful/unlabeled are required fields — no defaults"
         )
+    if warmup_routing_loss_weight_harmful is None:
+        warmup_routing_loss_weight_harmful = warmup_routing_loss_weight
+    if warmup_routing_loss_weight_std is None:
+        warmup_routing_loss_weight_std = warmup_routing_loss_weight
 
     if model_name == "list":
         available_models = "\n".join(sorted(name_to_config))
@@ -629,6 +641,8 @@ def setup(
         upsample_unlabeled=upsample_unlabeled,
         stage=stage,
         warmup_routing_loss_weight=warmup_routing_loss_weight,
+        warmup_routing_loss_weight_harmful=warmup_routing_loss_weight_harmful,
+        warmup_routing_loss_weight_std=warmup_routing_loss_weight_std,
         warmup_harmful_mass_floor=warmup_harmful_mass_floor,
         warmup_std_mass_ceiling=warmup_std_mass_ceiling,
         warmup_routing_loss_type=warmup_routing_loss_type,
@@ -658,6 +672,8 @@ def main(
     upsample_unlabeled: float = 1.0,
     stage: Literal["transfer", "warmup"] = "transfer",
     warmup_routing_loss_weight: float = 0.1,
+    warmup_routing_loss_weight_harmful: float = 0.1,
+    warmup_routing_loss_weight_std: float = 0.1,
     warmup_harmful_mass_floor: float = 0.6,
     warmup_std_mass_ceiling: float = 0.4,
     warmup_routing_loss_type: Literal["softplus", "relu"] = "softplus",
@@ -772,6 +788,8 @@ def main(
         upsample_unlabeled=upsample_unlabeled,
         stage=stage,
         warmup_routing_loss_weight=warmup_routing_loss_weight,
+        warmup_routing_loss_weight_harmful=warmup_routing_loss_weight_harmful,
+        warmup_routing_loss_weight_std=warmup_routing_loss_weight_std,
         warmup_harmful_mass_floor=warmup_harmful_mass_floor,
         warmup_std_mass_ceiling=warmup_std_mass_ceiling,
         warmup_routing_loss_type=warmup_routing_loss_type,
@@ -828,6 +846,8 @@ def fit(
     val_loaders: Optional[dict[str, DataLoader]] = None,
     stage: Literal["transfer", "warmup"] = "transfer",
     warmup_routing_loss_weight: float = 0.1,
+    warmup_routing_loss_weight_harmful: float = 0.1,
+    warmup_routing_loss_weight_std: float = 0.1,
     warmup_harmful_mass_floor: float = 0.6,
     warmup_std_mass_ceiling: float = 0.4,
     warmup_routing_loss_type: Literal["softplus", "relu"] = "softplus",
@@ -918,6 +938,7 @@ def fit(
         try:
             lm_loss_values: list[torch.Tensor] = []
             routing_loss_values: list[torch.Tensor] = []
+            weighted_routing_loss_values: list[torch.Tensor] = []
             total_loss_values: list[torch.Tensor] = []
             harmful_mass_values: list[torch.Tensor] = []
             for micro_batch_idx in range(accum_iters):
@@ -940,15 +961,24 @@ def fit(
                             std_mass_ceiling=warmup_std_mass_ceiling,
                             routing_loss_type=warmup_routing_loss_type,
                         )
-                        total_loss = lm_loss + warmup_routing_loss_weight * routing_loss
+                        if split_label == "D_harmful":
+                            split_routing_weight = warmup_routing_loss_weight_harmful
+                        elif split_label == "D_std":
+                            split_routing_weight = warmup_routing_loss_weight_std
+                        else:
+                            split_routing_weight = 0.0
+                        weighted_routing_loss = routing_loss * split_routing_weight
+                        total_loss = lm_loss + weighted_routing_loss
                     else:
                         harmful_mass = lm_loss.new_zeros(())
                         routing_loss = lm_loss.new_zeros(())
+                        weighted_routing_loss = lm_loss.new_zeros(())
                         total_loss = lm_loss
                     fabric.backward(total_loss / accum_iters)
 
                 lm_loss_values.append(lm_loss.detach())
                 routing_loss_values.append(routing_loss.detach())
+                weighted_routing_loss_values.append(weighted_routing_loss.detach())
                 total_loss_values.append(total_loss.detach())
                 harmful_mass_values.append(harmful_mass.detach())
 
@@ -967,6 +997,7 @@ def fit(
         if state["iter_num"] % log_iter_interval == 0:
             lm_loss_val = _reduce_scalar_mean(fabric, torch.stack(lm_loss_values).mean()).item()
             routing_loss_val = _reduce_scalar_mean(fabric, torch.stack(routing_loss_values).mean()).item()
+            weighted_routing_loss_val = _reduce_scalar_mean(fabric, torch.stack(weighted_routing_loss_values).mean()).item()
             total_loss_val = _reduce_scalar_mean(fabric, torch.stack(total_loss_values).mean()).item()
             harmful_mass_val = _reduce_scalar_mean(fabric, torch.stack(harmful_mass_values).mean()).item()
             t1 = time.perf_counter()
@@ -995,6 +1026,7 @@ def fit(
                     {
                         f"loss_lm_{split_label}": lm_loss_val,
                         f"loss_routing_{split_label}": routing_loss_val,
+                        f"loss_routing_weighted_{split_label}": weighted_routing_loss_val,
                         f"loss_total_{split_label}": total_loss_val,
                         f"routing_harmful_mass_{split_label}": harmful_mass_val,
                     }

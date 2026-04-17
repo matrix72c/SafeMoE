@@ -18,7 +18,9 @@ initial_checkpoint_dir: checkpoints/safemoe-qwen-warmup-wmdp-harmful-bootstrap-f
 
 
 # Warmup auxiliary routing loss; with forced harmful routing, this can be 0.
-warmup_routing_loss_weight: 0.2
+# warmup_routing_loss_weight: 0.2
+warmup_routing_loss_weight_harmful: 0.5
+warmup_routing_loss_weight_std: 0.1
 warmup_harmful_mass_floor: 0.5
 warmup_std_mass_ceiling: 0.1
 warmup_routing_loss_type: relu
