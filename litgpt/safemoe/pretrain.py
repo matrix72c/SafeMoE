@@ -226,10 +226,13 @@ def _build_optimizer(
     optimizer_config: Union[str, Dict],
     registry: HarmfulParamRegistry,
     freeze_theta_shared: bool = False,
+    freeze_router: bool = False,
 ):
     trainable_params = registry.parameters_by_type("theta_harmful") + registry.parameters_by_type("theta_std")
     if not freeze_theta_shared:
-        trainable_params += registry.parameters_by_type("theta_shared")
+        trainable_params += registry.parameters_by_type("theta_shared_non_router")
+    if not freeze_router:
+        trainable_params += registry.parameters_by_type("theta_router")
     extra_kwargs = {"fused": fabric.device.type == "cuda"}
     optimizer = instantiate_torch_optimizer(
         optimizer_config,
@@ -477,6 +480,7 @@ def setup(
     harmful_only: bool = False,
     force_harmful_routing: bool = False,
     freeze_theta_shared: bool = False,
+    freeze_router: Optional[bool] = None,
     resume_model_only: bool = False,
 ):
     """Pretrain a SafeMoE model with split-aware masking and validation.
@@ -518,7 +522,9 @@ def setup(
         epsilon: Noise scale for warmup auto-surgery.
         harmful_only: If True, train only on the D_harmful split.
         force_harmful_routing: If True, force MoE routing to harmful experts only.
-        freeze_theta_shared: If True, freeze shared parameters and keep them out of optimizer updates.
+        freeze_theta_shared: If True, freeze shared non-router parameters and keep them out of optimizer updates.
+        freeze_router: Controls router trainability independently. If omitted, defaults to the same value as
+            ``freeze_theta_shared`` for backward-compatible behavior.
         resume_model_only: If True, allows `--resume` from model-only checkpoints by restoring model weights and
             resetting optimizer and step counters.
     """
@@ -530,6 +536,8 @@ def setup(
         warmup_routing_loss_weight_harmful = warmup_routing_loss_weight
     if warmup_routing_loss_weight_std is None:
         warmup_routing_loss_weight_std = warmup_routing_loss_weight
+    if freeze_router is None:
+        freeze_router = freeze_theta_shared
 
     if model_name == "list":
         available_models = "\n".join(sorted(name_to_config))
@@ -648,6 +656,7 @@ def setup(
         warmup_routing_loss_type=warmup_routing_loss_type,
         harmful_only=harmful_only,
         freeze_theta_shared=freeze_theta_shared,
+        freeze_router=freeze_router,
         resume_model_only=resume_model_only,
     )
 
@@ -679,9 +688,12 @@ def main(
     warmup_routing_loss_type: Literal["softplus", "relu"] = "softplus",
     harmful_only: bool = False,
     freeze_theta_shared: bool = False,
+    freeze_router: Optional[bool] = None,
     resume_model_only: bool = False,
 ) -> None:
     validate_args(train, eval, initial_checkpoint_dir, resume)
+    if freeze_router is None:
+        freeze_router = freeze_theta_shared
 
     if fabric.global_rank == 0:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -692,13 +704,19 @@ def main(
     registry = HarmfulParamRegistry(model, config)
     registry.validate()
     if freeze_theta_shared:
-        for param in registry.parameters_by_type("theta_shared"):
+        for param in registry.parameters_by_type("theta_shared_non_router"):
+            param.requires_grad_(False)
+    if freeze_router:
+        for param in registry.parameters_by_type("theta_router"):
             param.requires_grad_(False)
     model = fabric.setup(model)
     registry.bind(_unwrap_safemoe_model(model))
     registry.validate()
     if freeze_theta_shared:
-        for param in registry.parameters_by_type("theta_shared"):
+        for param in registry.parameters_by_type("theta_shared_non_router"):
+            param.requires_grad_(False)
+    if freeze_router:
+        for param in registry.parameters_by_type("theta_router"):
             param.requires_grad_(False)
 
     data.connect(tokenizer=tokenizer, batch_size=train.micro_batch_size, max_seq_length=model.max_seq_length)
@@ -723,7 +741,13 @@ def main(
             fabric.print(f"Loading initial model weights from raw checkpoint: {init_ckpt}")
             fabric.load_raw(init_ckpt, model)
 
-    optimizer = _build_optimizer(fabric, optimizer, registry, freeze_theta_shared=freeze_theta_shared)
+    optimizer = _build_optimizer(
+        fabric,
+        optimizer,
+        registry,
+        freeze_theta_shared=freeze_theta_shared,
+        freeze_router=freeze_router,
+    )
 
     state = {
         "model": model,

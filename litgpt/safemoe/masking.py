@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 class HarmfulParamRegistry:
     _EXPERT_RE = re.compile(r"transformer\.h\.\d+\.mlp\.experts\.(\d+)\.")
+    _ROUTER_RE = re.compile(r"transformer\.h\.\d+\.mlp\.gate(?:\.|$)")
 
     def __init__(self, model: nn.Module, config: Config) -> None:
         self._harmful_expert_indices = tuple(config.harmful_expert_indices)
@@ -21,6 +22,8 @@ class HarmfulParamRegistry:
         registry_names: dict[str, list[str]] = {
             "theta_harmful": [],
             "theta_std": [],
+            "theta_router": [],
+            "theta_shared_non_router": [],
             "theta_shared": [],
         }
 
@@ -31,7 +34,11 @@ class HarmfulParamRegistry:
                 expert_idx = int(match.group(1))
                 split = "theta_harmful" if expert_idx in harmful_expert_indices else "theta_std"
                 registry_names[split].append(clean)
+            elif self._ROUTER_RE.match(clean):
+                registry_names["theta_router"].append(clean)
+                registry_names["theta_shared"].append(clean)
             else:
+                registry_names["theta_shared_non_router"].append(clean)
                 registry_names["theta_shared"].append(clean)
 
         self._registry_names = registry_names
