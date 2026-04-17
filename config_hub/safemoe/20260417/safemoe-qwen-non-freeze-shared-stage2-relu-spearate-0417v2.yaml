@@ -4,7 +4,7 @@ devices: auto
 num_nodes: 1
 seed: 42
 logger_name: wandb
-run_name: safemoe-qwen-non-freeze-shared-stage2-relu-spearate-0417
+run_name: safemoe-qwen-non-freeze-shared-stage2-relu-spearate-0417v2
 precision: bf16-mixed
 log:
   project: safemoe
@@ -95,6 +95,6 @@ data:
         prepare_mode: in_memory
 
 # Keep only harmful split active during training.
-upsample_std: 0.1
+upsample_std: 1.0
 upsample_harmful: 1.0
 upsample_unlabeled: 0.0
